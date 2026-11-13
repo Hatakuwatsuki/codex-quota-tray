@@ -1,0 +1,13 @@
+# 编译产物
+*.exe
+*.pdb
+
+# 运行时数据
+settings.txt
+last.json
+tray.log
+*.log
+desktop-icon-*.ico
+
+# 打包产物
+*.zip

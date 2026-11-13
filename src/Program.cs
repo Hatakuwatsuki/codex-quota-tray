@@ -1,0 +1,2595 @@
+﻿// ============================================================
+//  Codex 额度显示器（Windows 通知区域 / 托盘）
+//
+//  显示四样东西：5 小时额度、7 天额度，以及两者各自什么时候恢复。
+//  悬停图标看数字；右键菜单：刷新 / 额度详情 / 额度提醒 / 开机自启动 / 建快捷方式 / 退出。
+//  注意：网关模式不随正式版发布（见项目书 2.0），切模式用桌面上的独立脚本。
+//
+//  数据来源：quota.js -> codex app-server -> account/rateLimits/read
+//  编译：csc /target:winexe（见 rebuild.ps1）
+// ============================================================
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+[assembly: AssemblyTitle("Codex 额度显示器")]
+[assembly: AssemblyProduct("Codex 额度显示器")]
+[assembly: AssemblyDescription("在通知区域显示 ChatGPT 5 小时 / 7 天额度")]
+[assembly: AssemblyVersion("1.6.0.0")]
+
+namespace QuotaTrayApp
+{
+    internal static class Program
+    {
+        [STAThread]
+        private static void Main(string[] args)
+        {
+            // 命令行模式：给构建脚本用，不启动托盘
+            if (args != null && args.Length >= 2)
+            {
+                if (args[0] == "--make-ico")
+                {
+                    TrayContext.WriteIco(args[1], 0, 0, false);
+                    return;
+                }
+                if (args[0] == "--icon-preview")
+                {
+                    // 用法：--icon-preview <目录> [上段已用%] [下段已用%]
+                    // 不传就沿用 14 / 68。加这两个参数是为了能按指定状态做对比图。
+                    double pu = 14, su = 68;
+                    if (args.Length >= 4)
+                    {
+                        double tmp1, tmp2;
+                        if (double.TryParse(args[2], out tmp1)) pu = tmp1;
+                        if (double.TryParse(args[3], out tmp2)) su = tmp2;
+                    }
+                    foreach (int s in new int[] { 16, 32, 48, 64, 256 })
+                    {
+                        using (var bmp = TrayContext.RenderGauge(s, pu, su, true))
+                        {
+                            bmp.Save(Path.Combine(args[1], "preview-" + s + ".png"), ImageFormat.Png);
+                        }
+                    }
+                    return;
+                }
+                if (args[0] == "--icon-variants")
+                {
+                    using (var bmp = TrayContext.RenderGauge(256, 14, 68, true))
+                    {
+                        bmp.Save(Path.Combine(args[1], "variant-0.png"), ImageFormat.Png);
+                    }
+                    return;
+                }
+                if (args[0] == "--preview-pro")
+                {
+                    // 用法：--preview-pro <目录>
+                    // 生成 Pro 单环示意，并排一张现版双环做对照（浅色 / 深色各一行）。
+                    TrayContext.WriteProPreview(args[1]);
+                    return;
+                }
+                if (args[0] == "--test-notify")
+                {
+                    // 用法：--test-notify <输出文件>；只跑提醒逻辑、写文本，不弹窗
+                    TrayContext.WriteNotifySelfTest(args[1]);
+                    return;
+                }
+                if (args[0] == "--test-toast" && args.Length >= 3)
+                {
+                    // 用法：--test-toast <目录> <wav路径>；出弹窗截图 + 播一次提示音
+                    TrayContext.WriteToastPreview(args[1], args[2]);
+                    return;
+                }
+                if (args[0] == "--test-toast-live")
+                {
+                    // 用法：--test-toast-live <wav路径>；真弹一次通知，让人看进场/退场动画
+                    TrayContext.RunToastLive(args.Length >= 2 ? args[1] : null);
+                    return;
+                }
+                if (args[0] == "--demo-toast")
+                {
+                    // 用法：--demo-toast <5h-empty|7d-empty|25|10>；给桌面测试脚本用
+                    TrayContext.RunToastDemo(args.Length >= 2 ? args[1] : "25");
+                    return;
+                }
+            }
+
+            bool createdNew;
+            using (var mutex = new Mutex(true, "CodexQuotaTrayAppMutex", out createdNew))
+            {
+                if (!createdNew) return; // 已经有一个在跑
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new TrayContext());
+            }
+        }
+    }
+
+    internal class WindowInfo
+    {
+        public double used = -1;
+        public double windowMins;
+        public double resetsAt;
+    }
+
+    internal class QuotaResult
+    {
+        public bool ok;
+        public string error;
+        public string plan;
+        public WindowInfo primary;
+        public WindowInfo secondary;
+    }
+
+    // 中日英三语。用法：界面文字一律走 L.T / L.F，表里没有的条目原样返回中文，
+    // 所以漏翻不会崩、只会显示中文。语言代码：zh / ja / en。
+    internal static class L
+    {
+        public static string Lang = "zh";
+
+        private static readonly System.Collections.Generic.Dictionary<string, string> En =
+            new System.Collections.Generic.Dictionary<string, string>();
+        private static readonly System.Collections.Generic.Dictionary<string, string> Ja =
+            new System.Collections.Generic.Dictionary<string, string>();
+
+        static L()
+        {
+            // ---------- 菜单与窗口 ----------
+            En["额度显示器"] = "Quota Tray";
+            En["刷新"] = "Refresh";
+            En["额度详情"] = "Quota details";
+            En["额度提醒"] = "Quota alerts";
+            En["关闭提醒"] = "Off";
+            En["低档"] = "Low";
+            En["中档"] = "Medium";
+            En["高档"] = "High";
+            En["开机自启动"] = "Start with Windows";
+            En["开启开机自启动"] = "Enable autostart";
+            En["关闭开机自启动"] = "Disable autostart";
+            En["创建桌面快捷方式"] = "Create desktop shortcut";
+            En["退出"] = "Exit";
+            En["语言"] = "Language";
+            En["自动"] = "Auto";
+
+            Ja["额度显示器"] = "クォータトレイ";
+            Ja["刷新"] = "更新";
+            Ja["额度详情"] = "残量の詳細";
+            Ja["额度提醒"] = "残量アラート";
+            Ja["关闭提醒"] = "オフ";
+            Ja["低档"] = "低";
+            Ja["中档"] = "中";
+            Ja["高档"] = "高";
+            Ja["开机自启动"] = "起動時に開始";
+            Ja["开启开机自启动"] = "自動起動を有効化";
+            Ja["关闭开机自启动"] = "自動起動を無効化";
+            Ja["创建桌面快捷方式"] = "デスクトップにショートカットを作成";
+            Ja["退出"] = "終了";
+            Ja["语言"] = "言語";
+            Ja["自动"] = "自動";
+
+            // ---------- 托盘提示 ----------
+            En["额度显示器｜正在读取额度…"] = "Quota Tray | Reading quota…";
+            En["正在读取额度…"] = "Reading quota…";
+            En["（右键可退出）"] = "(right-click to exit)";
+            En["5 小时"] = "5-hour";
+            En["{0} 天"] = "{0}-day";
+            En["5 小时 剩余 {0}%｜{1}"] = "5-hour: {0}% left · {1}";
+            En["{0} 天 剩余 {1}%｜{2}"] = "{0}-day: {1}% left · {2}";
+            En["5 小时 不限制"] = "5-hour: unlimited";
+            En["{0} 天 暂无数据"] = "{0}-day: no data";
+
+            Ja["额度显示器｜正在读取额度…"] = "クォータトレイ｜残量を読み込み中…";
+            Ja["正在读取额度…"] = "残量を読み込み中…";
+            Ja["（右键可退出）"] = "(右クリックで終了)";
+            Ja["5 小时"] = "5時間";
+            Ja["{0} 天"] = "{0}日";
+            Ja["5 小时 剩余 {0}%｜{1}"] = "5時間: 残り{0}%・{1}";
+            Ja["{0} 天 剩余 {1}%｜{2}"] = "{0}日: 残り{1}%・{2}";
+            Ja["5 小时 不限制"] = "5時間: 制限なし";
+            Ja["{0} 天 暂无数据"] = "{0}日: データなし";
+
+            // ---------- 倒计时 ----------
+            En["恢复时间未知"] = "reset time unknown";
+            En["即将恢复"] = "resetting now";
+            En["{0} 天 {1} 小时后恢复"] = "resets in {0}d {1}h";
+            En["{0} 小时 {1} 分后恢复"] = "resets in {0}h {1}m";
+            En["{0} 分钟后恢复"] = "resets in {0}m";
+
+            Ja["恢复时间未知"] = "リセット時刻は不明";
+            Ja["即将恢复"] = "まもなくリセット";
+            Ja["{0} 天 {1} 小时后恢复"] = "あと{0}日{1}時間でリセット";
+            Ja["{0} 小时 {1} 分后恢复"] = "あと{0}時間{1}分でリセット";
+            Ja["{0} 分钟后恢复"] = "あと{0}分でリセット";
+
+            // ---------- 弹窗正文 ----------
+            En["{0}额度还剩 {1}%｜{2}"] = "{0} quota: {1}% left · {2}";
+            En["{0}额度只剩 {1}%｜{2}"] = "{0} quota: only {1}% left · {2}";
+            En["{0}额度已耗尽"] = "{0} quota used up";
+
+            Ja["{0}额度还剩 {1}%｜{2}"] = "{0}の残量: {1}%・{2}";
+            Ja["{0}额度只剩 {1}%｜{2}"] = "{0}の残量: 残りわずか{1}%・{2}";
+            Ja["{0}额度已耗尽"] = "{0}の残量を使い切りました";
+
+            // ---------- 详情窗 ----------
+            En["Codex 额度"] = "Codex quota";
+            En["套餐：{0}"] = "Plan: {0}";
+            En["5 小时额度"] = "5-hour quota";
+            En["{0} 天额度"] = "{0}-day quota";
+            En["剩余 {0}%"] = "{0}% left";
+            En["恢复：{0}"] = "Resets: {0}";
+            En["暂无数据"] = "No data";
+            En["不限制（当前套餐不含这项限额）"] = "Unlimited in this plan";
+            En["关闭"] = "Close";
+            En["正在读取额度，请稍等一下。"] = "Reading quota, one moment.";
+            En["还没拿到额度数据。\r\n\r\n原因：{0}"] = "No quota data yet.\r\n\r\nReason: {0}";
+            En["未知"] = "unknown";
+            En["{0}（已到期）"] = "{0} (expired)";
+            En["{0}（还有 {1}）"] = "{0} (in {1})";
+            En["{0} 天 {1} 小时"] = "{0}d {1}h";
+            En["{0} 小时 {1} 分"] = "{0}h {1}m";
+            En["{0} 分钟"] = "{0}m";
+
+            Ja["Codex 额度"] = "Codex クォータ";
+            Ja["套餐：{0}"] = "プラン: {0}";
+            Ja["5 小时额度"] = "5時間の残量";
+            Ja["{0} 天额度"] = "{0}日の残量";
+            Ja["剩余 {0}%"] = "残り{0}%";
+            Ja["恢复：{0}"] = "リセット: {0}";
+            Ja["暂无数据"] = "データなし";
+            Ja["不限制（当前套餐不含这项限额）"] = "このプランでは制限なし";
+            Ja["关闭"] = "閉じる";
+            Ja["正在读取额度，请稍等一下。"] = "残量を読み込み中です。少々お待ちください。";
+            Ja["还没拿到额度数据。\r\n\r\n原因：{0}"] = "残量データを取得できませんでした。\r\n\r\n理由: {0}";
+            Ja["未知"] = "不明";
+            Ja["{0}（已到期）"] = "{0} (期限切れ)";
+            Ja["{0}（还有 {1}）"] = "{0} (あと {1})";
+            Ja["{0} 天 {1} 小时"] = "{0}日{1}時間";
+            Ja["{0} 小时 {1} 分"] = "{0}時間{1}分";
+            Ja["{0} 分钟"] = "{0}分";
+
+            // ---------- 气泡提示 ----------
+            En["设置失败"] = "Settings failed";
+            En["写注册表没成功，可能是权限问题。"] = "Could not write the registry. This may be a permissions problem.";
+            En["已开启开机自启动"] = "Autostart enabled";
+            En["已关闭开机自启动"] = "Autostart disabled";
+            En["下次登录 Windows 就会自动启动。"] = "It will start the next time you sign in.";
+            En["下次登录不会再自动启动。"] = "It will not start automatically next time.";
+            En["已创建"] = "Created";
+            En["桌面快捷方式已就位，图标会跟着额度变化。"] = "Desktop shortcut is ready. Its icon follows your quota.";
+            En["额度显示器已就绪"] = "Quota Tray is ready";
+            En["桌面图标会跟着额度一起变。右键托盘图标可查看详情。"] = "The desktop icon follows your quota. Right-click the tray icon for details.";
+            En["已关闭，不再弹通知。"] = "Alerts turned off.";
+            En["已设为{0}。"] = "Set to {0}.";
+
+            Ja["设置失败"] = "設定に失敗しました";
+            Ja["写注册表没成功，可能是权限问题。"] = "レジストリに書き込めませんでした。権限の問題かもしれません。";
+            Ja["已开启开机自启动"] = "自動起動を有効にしました";
+            Ja["已关闭开机自启动"] = "自動起動を無効にしました";
+            Ja["下次登录 Windows 就会自动启动。"] = "次回サインイン時に自動で起動します。";
+            Ja["下次登录不会再自动启动。"] = "次回からは自動起動しません。";
+            Ja["已创建"] = "作成しました";
+            Ja["桌面快捷方式已就位，图标会跟着额度变化。"] = "デスクトップにショートカットを作成しました。アイコンは残量に合わせて変わります。";
+            Ja["额度显示器已就绪"] = "クォータトレイの準備ができました";
+            Ja["桌面图标会跟着额度一起变。右键托盘图标可查看详情。"] = "デスクトップのアイコンも残量に合わせて変わります。トレイアイコンを右クリックすると詳細を表示できます。";
+            Ja["已关闭，不再弹通知。"] = "アラートをオフにしました。";
+            Ja["已设为{0}。"] = "{0} に設定しました。";
+
+            // ---------- 错误 ----------
+            En["找不到 quota.js"] = "quota.js not found";
+            En["查询超时"] = "Query timed out";
+            En["查询无输出"] = "Query returned nothing";
+            En["返回格式异常"] = "Unexpected response format";
+            En["查询失败，稍后重试"] = "Query failed, will retry";
+
+            Ja["找不到 quota.js"] = "quota.js が見つかりません";
+            Ja["查询超时"] = "タイムアウトしました";
+            Ja["查询无输出"] = "応答がありません";
+            Ja["返回格式异常"] = "応答の形式が想定外です";
+            Ja["查询失败，稍后重试"] = "取得に失敗しました。後で再試行します";
+
+            // ---------- 桌面快捷方式 ----------
+            En["额度显示器.lnk"] = "Codex Quota.lnk";
+            En["Codex 额度显示器，右下角托盘"] = "Codex quota in the notification area";
+
+            Ja["额度显示器.lnk"] = "クォータトレイ.lnk";
+            Ja["Codex 额度显示器，右下角托盘"] = "Codex のクォータを通知領域に表示";
+
+            // ---------- 测试台弹窗 ----------
+            En["5 小时额度已耗尽"] = "5-hour quota used up";
+            En["7 天额度已耗尽"] = "7-day quota used up";
+            En["5 小时额度只剩 10%｜30 分后恢复"] = "5-hour quota: only 10% left · resets in 30m";
+            En["5 小时额度还剩 75%｜2 小时后恢复"] = "5-hour quota: 75% left · resets in 2h";
+            En["5 小时额度只剩 10%｜1 小时 51 分后恢复"] = "5-hour quota: only 10% left · resets in 1h 51m";
+            En["5 小时额度还剩 19%｜2 小时 22 分后恢复"] = "5-hour quota: 19% left · resets in 2h 22m";
+
+            Ja["5 小时额度已耗尽"] = "5時間の残量を使い切りました";
+            Ja["7 天额度已耗尽"] = "7日の残量を使い切りました";
+            Ja["5 小时额度只剩 10%｜30 分后恢复"] = "5時間の残量: 残りわずか10%・あと30分でリセット";
+            Ja["5 小时额度还剩 75%｜2 小时后恢复"] = "5時間の残量: 75%・あと2時間でリセット";
+            Ja["5 小时额度只剩 10%｜1 小时 51 分后恢复"] = "5時間の残量: 残りわずか10%・あと1時間51分でリセット";
+            Ja["5 小时额度还剩 19%｜2 小时 22 分后恢复"] = "5時間の残量: 19%・あと2時間22分でリセット";
+        }
+
+        private static string Lookup(System.Collections.Generic.Dictionary<string, string> d, string zh)
+        {
+            string v;
+            return d.TryGetValue(zh, out v) ? v : zh;
+        }
+
+        public static string T(string zh)
+        {
+            if (zh == null || Lang == "zh") return zh;
+            return Lang == "ja" ? Lookup(Ja, zh) : Lookup(En, zh);
+        }
+
+        public static string F(string zh, params object[] args)
+        {
+            return string.Format(T(zh), args);
+        }
+
+        // 没有 TrayContext 的场合（测试台、预览）用它定语言：先看 settings.txt，再看系统语言
+        public static void AutoDetect()
+        {
+            Lang = Guess("auto");
+            try
+            {
+                string dir = Path.GetDirectoryName(Application.ExecutablePath);
+                AppSettings s = AppSettings.Load(dir);
+                Lang = Guess(s.language);
+            }
+            catch { }
+        }
+
+        // 自动 = 跟随系统；其余按设置来
+        public static string Guess(string setting)
+        {
+            if (setting == "zh" || setting == "ja" || setting == "en") return setting;
+            string c = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+            if (c == "zh") return "zh";
+            if (c == "ja") return "ja";
+            return "en";
+        }
+    }
+
+    // 提醒档位：-1 关，0 低，1 中，2 高。默认低档（剩 25% 和剩 10% 各一次）。
+    internal class AppSettings
+    {
+        public int notifyLevel = 0;
+        public string language = "auto";   // auto / zh / ja / en
+
+        public static AppSettings Load(string root)
+        {
+            AppSettings s = new AppSettings();
+            try
+            {
+                string p = Path.Combine(root, "settings.txt");
+                if (!File.Exists(p)) return s;
+                foreach (string raw in File.ReadAllLines(p, Encoding.UTF8))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string v = line.Substring(eq + 1).Trim().ToLowerInvariant();
+                    if (k == "language")
+                    {
+                        if (v == "zh" || v == "ja" || v == "en" || v == "auto") s.language = v;
+                    }
+                    else if (k == "notifylevel")
+                    {
+                        if (v == "off" || v == "none" || v == "-1") s.notifyLevel = -1;
+                        else if (v == "low" || v == "0") s.notifyLevel = 0;
+                        else if (v == "medium" || v == "mid" || v == "1") s.notifyLevel = 1;
+                        else if (v == "high" || v == "2") s.notifyLevel = 2;
+                    }
+                }
+            }
+            catch { }
+            return s;
+        }
+
+        public string Key()
+        {
+            if (notifyLevel < 0) return "off";
+            if (notifyLevel >= 2) return "high";
+            if (notifyLevel == 1) return "medium";
+            return "low";
+        }
+
+        public string Display()
+        {
+            if (notifyLevel < 0) return L.T("关闭提醒");
+            if (notifyLevel >= 2) return L.T("高档");
+            if (notifyLevel == 1) return L.T("中档");
+            return L.T("低档");
+        }
+
+        public void Save(string root)
+        {
+            try
+            {
+                string text = "# 额度提醒档位：off / low / medium / high" + Environment.NewLine
+                            + "notifyLevel=" + Key() + Environment.NewLine
+                            + "# 语言：auto / zh / ja / en" + Environment.NewLine
+                            + "language=" + language + Environment.NewLine;
+                File.WriteAllText(Path.Combine(root, "settings.txt"), text, new UTF8Encoding(false));
+            }
+            catch { }
+        }
+    }
+
+    // 触发阈值。数组里是"已用百分比"，但用户是按"还剩多少"来描述的，两者必须换算清楚：
+    //   低档  剩 25% / 剩 10%              → 已用 75 / 90
+    //   中档  剩 75% / 剩 25% / 剩 10%     → 已用 25 / 75 / 90
+    //   高档  剩 75% / 50% / 25% / 10%     → 已用 25 / 50 / 75 / 90
+    // 别再照着"用掉 25%"去写低档——2026-11-13 就是这么错的，低档在剩 75% 就提前弹了。
+    internal static class NotifyRules
+    {
+        public static int[] Tier(int level)
+        {
+            if (level >= 2) return new int[] { 25, 50, 75, 90 };
+            if (level == 1) return new int[] { 25, 75, 90 };
+            return new int[] { 75, 90 };
+        }
+
+        // Plus 的 7 天额度固定两刀，不受档位影响：剩 25% 和剩 10%
+        public static int[] LongFixed()
+        {
+            return new int[] { 75, 90 };
+        }
+    }
+
+    // 一个额度窗口的提醒状态。
+    // 关键：查询是跳着走的（7 天额度 5 分钟才一次），所以用"跨过"判断而不是"等于"；
+    // 额度重置后重新上膛；程序刚启动时先静默记基线，不立刻弹。
+    internal class NotifyWindow
+    {
+        public string name = "";
+        public int[] thresholds = new int[0];
+
+        private double lastUsed = -1;
+        private double lastReset = -1;
+        private bool emptyFired;
+        private readonly System.Collections.Generic.Dictionary<int, bool> fired =
+            new System.Collections.Generic.Dictionary<int, bool>();
+
+        // 本次采样是否刚跨到"用光"。由调用方决定发不发耗尽提示。
+        public bool Exhausted;
+
+        // 返回本次触发的阈值；0 表示没触发
+        public int Fire(double used, double resetsAt)
+        {
+            Exhausted = false;
+            if (used < 0)
+            {
+                lastUsed = -1;
+                return 0;
+            }
+
+            bool reset = (lastReset > 0 && resetsAt > 0 && Math.Abs(resetsAt - lastReset) > 1)
+                      || (lastUsed >= 0 && used + 30 < lastUsed);
+            if (reset)
+            {
+                fired.Clear();
+                emptyFired = false;
+                lastUsed = used;
+                lastReset = resetsAt;
+                return 0;
+            }
+
+            bool baseline = lastUsed < 0;
+            double prev = lastUsed;
+            lastUsed = used;
+            lastReset = resetsAt;
+            if (baseline) return 0;
+
+            // 用光了：单独一档，不走阈值表，因为文案和提示音都不一样
+            if (prev < 100.0 && used >= 100.0 && !emptyFired)
+            {
+                emptyFired = true;
+                Exhausted = true;
+                return 0;
+            }
+
+            int best = 0;
+            foreach (int t in thresholds)
+            {
+                if (prev < t && used >= t && !fired.ContainsKey(t) && t > best) best = t;
+            }
+            if (best > 0) fired[best] = true;
+            return best;
+        }
+    }
+
+    // 自绘提醒小窗：模仿 Windows 通知的观感（圆角卡片、应用名 + 标题 + 正文），
+    // 但完全由我们自己画，不走系统通知中心，也不抢焦点。
+    internal class ToastForm : Form
+    {
+        private const int CardW = 380;
+        private const int CardH = 98;
+
+        private readonly string titleText;
+        private readonly string bodyText;
+        private readonly bool dark;
+        private readonly Font smallFont;
+        private readonly Font titleFont;
+        private readonly Font bodyFont;
+        private readonly System.Windows.Forms.Timer life;
+
+        // 进场/退场动画：从屏幕右边缘滑进来，停 7 秒，再原路滑回去
+        private System.Windows.Forms.Timer anim;
+        private int animElapsed;
+        private int animDuration;
+        private bool animIn;
+        private bool dismissing;
+        private int endX;
+        private int yPos;
+        private const int SlideInMs = 260;
+        private const int SlideOutMs = 200;
+        private const int FrameMs = 15;
+
+        public ToastForm(string title, string body)
+        {
+            titleText = title;
+            bodyText = body;
+            dark = TrayContext.IsDarkMode();
+            smallFont = new Font("Microsoft YaHei UI", 9f);
+            titleFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+            bodyFont = new Font("Microsoft YaHei UI", 10f);
+
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(CardW, CardH);
+            BackColor = dark ? Color.FromArgb(44, 44, 44) : Color.FromArgb(250, 250, 250);
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint
+                | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+
+            life = new System.Windows.Forms.Timer();
+            life.Interval = 7000;
+            life.Tick += delegate { life.Stop(); Dismiss(); };
+
+            // 位置固定：右下角，离屏幕边和任务栏各 16px；进场前先藏在屏幕右边缘外面
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            yPos = wa.Bottom - CardH - 16;
+            endX = wa.Right - CardW - 16;
+            Location = new Point(wa.Right, yPos);
+            Opacity = 0.0;
+        }
+
+        // 不抢焦点：弹出来的时候仍然可以继续打字
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;    // WS_EX_NOACTIVATE
+                cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW，给个系统投影
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int pref = 2;   // DWMWCP_ROUND，Win11 圆角
+                TrayContext.DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int));
+            }
+            catch { }
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            StartAnim(true);
+        }
+
+        // 缓出曲线：起步快、收尾慢，跟系统通知的手感接近
+        private void StartAnim(bool slideIn)
+        {
+            animIn = slideIn;
+            animElapsed = 0;
+            animDuration = slideIn ? SlideInMs : SlideOutMs;
+            if (anim == null)
+            {
+                anim = new System.Windows.Forms.Timer();
+                anim.Interval = FrameMs;
+                anim.Tick += OnAnimTick;
+            }
+            anim.Start();
+        }
+
+        private void OnAnimTick(object sender, EventArgs e)
+        {
+            animElapsed += FrameMs;
+            double t = animElapsed >= animDuration ? 1.0 : (double)animElapsed / animDuration;
+            double eased = 1.0 - Math.Pow(1.0 - t, 3.0);
+
+            if (animIn)
+            {
+                int x = (int)Math.Round(Screen.PrimaryScreen.WorkingArea.Right + (endX - Screen.PrimaryScreen.WorkingArea.Right) * eased);
+                Location = new Point(x, yPos);
+                Opacity = eased;
+                if (t >= 1.0)
+                {
+                    anim.Stop();
+                    Location = new Point(endX, yPos);
+                    Opacity = 1.0;
+                    life.Start();
+                }
+            }
+            else
+            {
+                int from = endX;
+                int to = Screen.PrimaryScreen.WorkingArea.Right;
+                Location = new Point((int)Math.Round(from + (to - from) * eased), yPos);
+                Opacity = 1.0 - eased;
+                if (t >= 1.0)
+                {
+                    anim.Stop();
+                    Close();
+                }
+            }
+        }
+
+        private void Dismiss()
+        {
+            if (dismissing) return;
+            dismissing = true;
+            life.Stop();
+            StartAnim(false);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Dismiss();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Color fg = dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(24, 24, 24);
+            Color sub = dark ? Color.FromArgb(176, 176, 176) : Color.FromArgb(104, 104, 104);
+            Color border = dark ? Color.FromArgb(64, 64, 68) : Color.FromArgb(224, 224, 227);
+
+            using (Pen pen = new Pen(border))
+            {
+                g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            }
+
+            try
+            {
+                using (Icon ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                {
+                    if (ico != null) g.DrawIcon(ico, new Rectangle(18, 14, 18, 18));
+                }
+            }
+            catch { }
+
+            TextRenderer.DrawText(g, L.T("额度显示器"), smallFont, new Point(44, 15), sub, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, titleText, titleFont, new Rectangle(18, 41, CardW - 60, 20),
+                fg, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, bodyText, bodyFont, new Rectangle(18, 65, CardW - 36, 22),
+                fg, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+
+            // 右上角的关闭叉
+            using (Pen pen = new Pen(sub, 1.4f))
+            {
+                int cx = CardW - 24, cy = 18;
+                g.DrawLine(pen, cx - 4, cy - 4, cx + 4, cy + 4);
+                g.DrawLine(pen, cx + 4, cy - 4, cx - 4, cy + 4);
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            life.Stop();
+            life.Dispose();
+            if (anim != null) { anim.Stop(); anim.Dispose(); anim = null; }
+            smallFont.Dispose();
+            titleFont.Dispose();
+            bodyFont.Dispose();
+            base.OnFormClosed(e);
+        }
+    }
+
+    internal class TrayContext : ApplicationContext
+    {        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool DestroyIcon(IntPtr handle);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern void SHChangeNotify(int eventId, int flags, string item1, IntPtr item2);
+
+        private const int PrimaryEverySec = 5;     // 5 小时额度：每 5 秒
+        private const int SecondaryEverySec = 60;  // 7 天额度：每 1 分钟
+
+        // 详情窗配色（每次打开时读系统主题，浅色/深色自动跟随）
+        private bool detailDark;
+        private Color detailBg;
+        private Color detailFg;
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        [DllImport("dwmapi.dll")]
+        internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        private static void SetDarkTitleBar(IntPtr hwnd)
+        {
+            try
+            {
+                int one = 1;
+                // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 1903+），19 是更早的编号
+                if (DwmSetWindowAttribute(hwnd, 20, ref one, sizeof(int)) != 0)
+                {
+                    DwmSetWindowAttribute(hwnd, 19, ref one, sizeof(int));
+                }
+            }
+            catch { }
+        }
+
+        internal static bool IsDarkMode()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey k =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                        @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    if (k != null)
+                    {
+                        object v = k.GetValue("AppsUseLightTheme");
+                        if (v is int) return ((int)v) == 0;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // 开机自启动：写在 HKCU\...\Run 里，指向当前 exe
+        private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string RunValueName = "CodexQuotaTray";
+
+        private static string AutoStartValue()
+        {
+            return "\"" + Application.ExecutablePath + "\"";
+        }
+
+        private static bool IsAutoStartEnabled()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey k =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath))
+                {
+                    if (k == null) return false;
+                    object v = k.GetValue(RunValueName);
+                    if (v == null) return false;
+                    return string.Equals(Convert.ToString(v).Trim(), AutoStartValue(),
+                        StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool SetAutoStart(bool on)
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey k =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                {
+                    if (k == null) return false;
+                    if (on)
+                    {
+                        k.SetValue(RunValueName, AutoStartValue());
+                    }
+                    else if (k.GetValue(RunValueName) != null)
+                    {
+                        k.DeleteValue(RunValueName, false);
+                    }
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void UpdateAutoStartItem(ToolStripMenuItem item)
+        {
+            item.Text = IsAutoStartEnabled() ? L.T("关闭开机自启动") : L.T("开启开机自启动");
+        }
+
+        // 右键菜单的深色配色（浅色模式不用它，走系统默认）
+        private sealed class DarkMenuColors : ProfessionalColorTable
+        {
+            public override Color ToolStripDropDownBackground { get { return Color.FromArgb(32, 32, 32); } }
+            public override Color MenuItemSelected { get { return Color.FromArgb(58, 58, 64); } }
+            public override Color MenuItemSelectedGradientBegin { get { return Color.FromArgb(58, 58, 64); } }
+            public override Color MenuItemSelectedGradientEnd { get { return Color.FromArgb(58, 58, 64); } }
+            public override Color MenuItemBorder { get { return Color.FromArgb(72, 72, 80); } }
+            public override Color MenuBorder { get { return Color.FromArgb(64, 64, 70); } }
+            public override Color SeparatorDark { get { return Color.FromArgb(58, 58, 64); } }
+            public override Color SeparatorLight { get { return Color.FromArgb(44, 44, 48); } }
+            public override Color ImageMarginGradientBegin { get { return Color.FromArgb(32, 32, 32); } }
+            public override Color ImageMarginGradientMiddle { get { return Color.FromArgb(32, 32, 32); } }
+            public override Color ImageMarginGradientEnd { get { return Color.FromArgb(32, 32, 32); } }
+            // 勾选块：默认是浅色底 + 深色勾，深色菜单下等于看不见，这里换成深蓝底
+            public override Color CheckBackground { get { return Color.FromArgb(52, 96, 156); } }
+            public override Color CheckSelectedBackground { get { return Color.FromArgb(64, 116, 186); } }
+            public override Color CheckPressedBackground { get { return Color.FromArgb(64, 116, 186); } }
+        }
+
+        private static void ApplyMenuTheme(ContextMenuStrip menu)
+        {
+            if (IsDarkMode())
+            {
+                menu.Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
+                menu.BackColor = Color.FromArgb(32, 32, 32);
+                menu.ForeColor = Color.FromArgb(232, 232, 232);
+            }
+            else
+            {
+                menu.Renderer = new ToolStripProfessionalRenderer();
+                menu.BackColor = SystemColors.Control;
+                menu.ForeColor = SystemColors.ControlText;
+            }
+
+            ThemeMenuItems(menu.Items, IsDarkMode(), menu.ForeColor);
+        }
+
+        // 递归给子菜单上色。
+        // 之前只给顶层上色，"额度提醒"那个子菜单仍沿用系统浅色，
+        // 深色主题下就成了深底深字，几乎看不见。
+        private static void ThemeMenuItems(ToolStripItemCollection items, bool dark, Color fg)
+        {
+            foreach (ToolStripItem item in items)
+            {
+                item.BackColor = Color.Transparent;
+                item.ForeColor = fg;
+                ToolStripMenuItem mi = item as ToolStripMenuItem;
+                if (mi == null || mi.DropDownItems.Count == 0) continue;
+
+                mi.DropDown.BackColor = dark ? Color.FromArgb(32, 32, 32) : SystemColors.Control;
+                mi.DropDown.ForeColor = fg;
+                mi.DropDown.Renderer = dark
+                    ? (ToolStripRenderer)new ToolStripProfessionalRenderer(new DarkMenuColors())
+                    : (ToolStripRenderer)new ToolStripProfessionalRenderer();
+                ThemeMenuItems(mi.DropDownItems, dark, fg);
+            }
+        }
+
+        private readonly string root;
+        private readonly string logPath;
+        private readonly string quotaJs;
+        private readonly string nodeExe;
+
+        private readonly NotifyIcon tray;
+        private readonly System.Windows.Forms.Timer uiTimer;
+        private readonly ManualResetEvent refreshNow = new ManualResetEvent(false);
+        private readonly ManualResetEvent stopWorker = new ManualResetEvent(false);
+        private readonly object gate = new object();
+        private readonly Thread worker;
+
+        private QuotaResult pending;      // 后台线程放结果，UI 线程取
+        private bool hasPending;
+
+        private bool hasData;
+        private string plan = "";
+        private double primaryUsed = -1;
+        private double primaryReset;
+        private double secondaryUsed = -1;
+        private double secondaryReset;
+        private int secondaryDays = 7;
+        private DateTime secondaryShownAt = DateTime.MinValue;
+        private DateTime lastOkAt = DateTime.MinValue;
+        private string lastError = "";
+        private string lastLogged = "";
+        private string lastWindows = "";
+
+        private Icon currentIcon;
+
+        // 额度提醒
+        private AppSettings settings = new AppSettings();
+        private NotifyWindow notifyTiered;
+        private NotifyWindow notifyFixed;
+        private Font menuFontBold;
+
+        // 菜单项留引用：切语言时要就地改标题，不能重建整个菜单
+        private ToolStripMenuItem menuRefresh, menuDetail, menuNotify;
+        private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang;
+        private ToolStripMenuItem[] menuLevels = new ToolStripMenuItem[4];
+        private ToolStripMenuItem[] menuLangItems = new ToolStripMenuItem[4];
+        private static readonly int[] LevelValues = new int[] { -1, 0, 1, 2 };
+        private static readonly string[] LangValues = new string[] { "auto", "zh", "ja", "en" };
+
+        // 自绘提醒窗与提示音
+        private ToastForm toast;
+        private static System.Collections.Generic.Dictionary<string, System.Media.SoundPlayer> players;
+
+        // 调试预览模式：绝不碰桌面快捷方式和桌面图标
+        private bool noDesktopTouch;
+
+        // 桌面图标同步
+        private string desktopIconKey = "";
+        private int desktopIconSeq = 0;
+        private readonly string desktopIconRunTag = DateTime.Now.ToString("MMddHHmmss");
+
+        public TrayContext()
+        {
+            // 绿色版：数据优先放 exe 同目录（真便携）；目录不可写才退到 %APPDATA%。
+            // 当前安装的 exe 本来就在 ~/.codex/quota-tray 下，所以这对老部署完全兼容。
+            root = ResolveDataDir();
+            try { Directory.CreateDirectory(root); } catch { }
+            logPath = Path.Combine(root, "tray.log");
+            settings = AppSettings.Load(root);
+            ApplyLanguageSetting();
+            quotaJs = Path.Combine(root, "quota.js");
+            EnsureQuotaJs();       // 单文件 exe：js 内嵌在程序里，缺了就解出来
+            nodeExe = FindNode();
+
+            tray = new NotifyIcon();
+            tray.Visible = true;
+            tray.Icon = DrawIcon(0, 0, false);
+            currentIcon = tray.Icon;
+            tray.Text = ClampTray(L.T("额度显示器｜正在读取额度…"));
+
+            var menu = new ContextMenuStrip();
+            menu.ShowImageMargin = false;
+            menuFontBold = new Font(SystemFonts.MenuFont, FontStyle.Bold);
+
+            menuRefresh = new ToolStripMenuItem();
+            menuRefresh.Click += delegate { refreshNow.Set(); };
+
+            menuDetail = new ToolStripMenuItem();
+            menuDetail.Click += delegate { ShowDetail(); };
+
+            // 额度提醒：档位直接决定 5 小时额度（Pro 则是 7 天额度）在哪些节点响。
+            menuNotify = new ToolStripMenuItem();
+            for (int i = 0; i < LevelValues.Length; i++)
+            {
+                int v = LevelValues[i];
+                ToolStripMenuItem mi = new ToolStripMenuItem();
+                mi.Click += delegate { SetNotifyLevel(v); };
+                menuLevels[i] = mi;
+                menuNotify.DropDownItems.Add(mi);
+            }
+
+            menuAutoStart = new ToolStripMenuItem();
+            menuAutoStart.Click += delegate
+            {
+                bool target = !IsAutoStartEnabled();
+                if (!SetAutoStart(target))
+                {
+                    ShowBalloon(L.T("设置失败"), L.T("写注册表没成功，可能是权限问题。"));
+                    UpdateAutoStartItem(menuAutoStart);
+                    return;
+                }
+                UpdateAutoStartItem(menuAutoStart);
+                ShowBalloon(L.T(target ? "已开启开机自启动" : "已关闭开机自启动"),
+                    L.T(target ? "下次登录 Windows 就会自动启动。" : "下次登录不会再自动启动。"));
+                Log("开机自启动 -> " + (target ? "开" : "关"));
+            };
+
+            menuShortcut = new ToolStripMenuItem();
+            menuShortcut.Click += delegate
+            {
+                if (EnsureDesktopShortcut(true))
+                    ShowBalloon(L.T("已创建"), L.T("桌面快捷方式已就位，图标会跟着额度变化。"));
+            };
+
+            menuExit = new ToolStripMenuItem();
+            menuExit.Click += delegate
+            {
+                tray.Visible = false;
+                tray.Dispose();
+                ExitThread();
+            };
+
+            // 语言：自动 = 跟随系统，其余两种手动锁死
+            menuLang = new ToolStripMenuItem();
+            for (int i = 0; i < LangValues.Length; i++)
+            {
+                string v = LangValues[i];
+                ToolStripMenuItem mi = new ToolStripMenuItem();
+                mi.Click += delegate { SetLanguage(v); };
+                menuLangItems[i] = mi;
+                menuLang.DropDownItems.Add(mi);
+            }
+
+            // 顺序：先查看，再设置，然后杂项，退出单独一条放最底
+            menu.Items.Add(menuRefresh);
+            menu.Items.Add(menuDetail);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(menuNotify);
+            menu.Items.Add(menuAutoStart);
+            menu.Items.Add(menuLang);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(menuShortcut);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(menuExit);
+
+            ApplyLanguage();
+            UpdateAutoStartItem(menuAutoStart);
+
+            menu.Opening += delegate {
+                ApplyMenuTheme(menu);
+                UpdateAutoStartItem(menuAutoStart);
+                for (int i = 0; i < menuLevels.Length; i++)
+                {
+                    bool on = (LevelValues[i] == settings.notifyLevel);
+                    menuLevels[i].Checked = on;
+                    // 加粗 + 勾选双保险：深色菜单里那个勾不一定看得清
+                    menuLevels[i].Font = on ? menuFontBold : SystemFonts.MenuFont;
+                }
+                for (int i = 0; i < menuLangItems.Length; i++)
+                {
+                    bool on = (LangValues[i] == settings.language);
+                    menuLangItems[i].Checked = on;
+                    menuLangItems[i].Font = on ? menuFontBold : SystemFonts.MenuFont;
+                }
+            };
+            tray.ContextMenuStrip = menu;
+
+            // 调试用：--preview-menu <png> 把右键菜单展开并截图，检查深色下的对比度
+            string[] menuArgv = Environment.GetCommandLineArgs();
+            if (menuArgv.Length > 2 && menuArgv[1] == "--preview-menu")
+            {
+                string shotPath = menuArgv[2];
+                System.Windows.Forms.Timer t1 = new System.Windows.Forms.Timer();
+                t1.Interval = 500;
+                t1.Tick += delegate
+                {
+                    t1.Stop();
+                    menu.Show(new Point(220, 220));
+                    menuNotify.ShowDropDown();
+                    System.Windows.Forms.Timer t2 = new System.Windows.Forms.Timer();
+                    t2.Interval = 600;
+                    t2.Tick += delegate
+                    {
+                        t2.Stop();
+                        try
+                        {
+                            Rectangle r = menu.Bounds;
+                            if (menuNotify.DropDown.Visible)
+                                r = Rectangle.Union(r, menuNotify.DropDown.Bounds);
+                            r.Inflate(12, 12);
+                            int x = Math.Max(0, r.Left), y = Math.Max(0, r.Top);
+                            int w = Math.Min(r.Width, 1600), h = Math.Min(r.Height, 1200);
+                            using (var bmp = new Bitmap(w, h))
+                            using (var g = Graphics.FromImage(bmp))
+                            {
+                                g.CopyFromScreen(x, y, 0, 0, new Size(w, h));
+                                bmp.Save(shotPath, ImageFormat.Png);
+                            }
+                        }
+                        catch { }
+                        ExitThread();
+                    };
+                    t2.Start();
+                };
+                t1.Start();
+            }
+
+            // 双击图标 = 刷新
+            tray.DoubleClick += delegate { refreshNow.Set(); };
+
+            Log("启动（pid=" + Process.GetCurrentProcess().Id + "，node=" + nodeExe + "）");
+
+            // 调试用：加 --preview-detail 直接弹详情窗（假数据），方便检查样式
+            string[] argv = Environment.GetCommandLineArgs();
+            if (argv.Length > 1 && argv[1] == "--preview-detail")
+            {
+                plan = "plus";
+                primaryUsed = 3;
+                primaryReset = ToUnix(DateTime.UtcNow.AddHours(2));
+                secondaryUsed = 82;
+                secondaryReset = ToUnix(DateTime.UtcNow.AddDays(3));
+                secondaryDays = 7;
+                hasData = true;
+                ShowDetail();
+                ExitThread();
+                return;
+            }
+
+            // 第一次运行时自动建桌面快捷方式（绿色版的"开箱即用"）：
+            // 只在首次做一次，之后用户自己删掉了就不再自动重建（可在右键菜单手动建）。
+            string firstRunMark = Path.Combine(root, ".first-run-done");
+            // 预览模式跑在临时目录里，绝不能让桌面快捷方式指过去
+            noDesktopTouch = argv.Length > 1 && argv[1] == "--preview-menu";
+            if (!noDesktopTouch && !File.Exists(firstRunMark))
+            {
+                if (EnsureDesktopShortcut(true))
+                {
+                    ShowBalloon(L.T("额度显示器已就绪"),
+                        L.T("桌面图标会跟着额度一起变。右键托盘图标可查看详情。"));
+                }
+                try { File.WriteAllText(firstRunMark, DateTime.Now.ToString("s")); } catch { }
+            }
+
+            // 开机/重启时先看上次的桌面图标还能不能直接用：
+            // 数值没变就不重画、不改快捷方式、不通知 Shell，桌面一个像素都不动。
+            LoadDesktopIconState();
+
+            uiTimer = new System.Windows.Forms.Timer();
+            uiTimer.Interval = 1000;
+            uiTimer.Tick += delegate { PumpResults(); };
+            uiTimer.Start();
+
+            worker = new Thread(WorkerLoop);
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        // ---------- 语言 ----------
+        private void ApplyLanguageSetting()
+        {
+            L.Lang = L.Guess(settings.language);
+        }
+
+        private void SetLanguage(string v)
+        {
+            settings.language = v;
+            settings.Save(root);
+            ApplyLanguageSetting();
+            ApplyLanguage();
+            Log("语言 -> " + v);
+        }
+
+        // 就地换掉所有菜单文字，不重建菜单
+        private void ApplyLanguage()
+        {
+            if (menuRefresh == null) return;
+            menuRefresh.Text = L.T("刷新");
+            menuDetail.Text = L.T("额度详情");
+            menuNotify.Text = L.T("额度提醒");
+            menuLevels[0].Text = L.T("关闭提醒");
+            menuLevels[1].Text = L.T("低档");
+            menuLevels[2].Text = L.T("中档");
+            menuLevels[3].Text = L.T("高档");
+            menuAutoStart.Text = L.T("开机自启动");
+            menuShortcut.Text = L.T("创建桌面快捷方式");
+            menuExit.Text = L.T("退出");
+            menuLang.Text = L.T("语言");
+            menuLangItems[0].Text = L.T("自动");
+            menuLangItems[1].Text = "中文";
+            menuLangItems[2].Text = "日本語";
+            menuLangItems[3].Text = "English";
+            UpdateAutoStartItem(menuAutoStart);
+            UpdateUi();
+        }
+
+        // ---------- 额度提醒 ----------
+        private void SetNotifyLevel(int v)
+        {
+            settings.notifyLevel = v;
+            settings.Save(root);
+            notifyTiered = null;   // 重建：清空已上膛记录，下一次采样重新静默打基线
+            notifyFixed = null;
+            ShowBalloon(L.T("额度提醒"), v < 0 ? L.T("已关闭，不再弹通知。") : L.F("已设为{0}。", settings.Display()));
+            Log("额度提醒档位 -> " + settings.Key());
+        }
+
+        private void EnsureNotifiers(bool singleWindow)
+        {
+            int[] tier = NotifyRules.Tier(settings.notifyLevel);
+            string tag = singleWindow ? "long" : "short";
+            if (notifyTiered == null || notifyTiered.name != tag || !SameThresholds(notifyTiered.thresholds, tier))
+            {
+                notifyTiered = new NotifyWindow();
+                notifyTiered.name = tag;
+                notifyTiered.thresholds = tier;
+            }
+            if (notifyFixed == null)
+            {
+                notifyFixed = new NotifyWindow();
+                notifyFixed.name = "longFixed";
+                notifyFixed.thresholds = NotifyRules.LongFixed();
+            }
+        }
+
+        private static bool SameThresholds(int[] a, int[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
+        }
+
+        // 一次采样后统一判定。档位只管"阶梯窗口"：
+        //   Plus —— 5 小时额度按档位；7 天额度固定两刀（剩余 25%、剩余 10%）
+        //   Pro  —— 只有 7 天额度，按档位
+        private void EvaluateNotify()
+        {
+            if (!hasData || settings.notifyLevel < 0) return;
+            bool singleWindow = primaryUsed < 0;
+            EnsureNotifiers(singleWindow);
+
+            if (singleWindow)
+            {
+                if (secondaryUsed < 0) return;
+                int t = notifyTiered.Fire(secondaryUsed, secondaryReset);
+                if (notifyTiered.Exhausted) NotifyExhausted(L.F("{0} 天", secondaryDays), "notify-7d-empty.wav");
+                else if (t > 0) NotifyQuota(L.F("{0} 天", secondaryDays), secondaryUsed, secondaryReset, t);
+                return;
+            }
+
+            if (primaryUsed >= 0)
+            {
+                int t = notifyTiered.Fire(primaryUsed, primaryReset);
+                if (notifyTiered.Exhausted) NotifyExhausted(L.T("5 小时"), "notify-5h-empty.wav");
+                else if (t > 0) NotifyQuota(L.T("5 小时"), primaryUsed, primaryReset, t);
+            }
+            if (secondaryUsed >= 0)
+            {
+                int t = notifyFixed.Fire(secondaryUsed, secondaryReset);
+                if (notifyFixed.Exhausted) NotifyExhausted(L.F("{0} 天", secondaryDays), "notify-7d-empty.wav");
+                else if (t > 0) NotifyQuota(L.F("{0} 天", secondaryDays), secondaryUsed, secondaryReset, t);
+            }
+        }
+
+        private void NotifyQuota(string windowName, double used, double reset, int threshold)
+        {
+            int remain = 100 - (int)Math.Round(used);
+            if (remain < 0) remain = 0;
+            if (remain > 100) remain = 100;
+            bool lastCall = threshold >= 90;
+            string body = L.F(lastCall ? "{0}额度只剩 {1}%｜{2}" : "{0}额度还剩 {1}%｜{2}",
+                windowName, remain, Countdown(reset));
+            ShowToast(L.T("额度提醒"), body, "notify.wav");
+            Log("额度提醒 -> " + body);
+        }
+
+        // 用光了：文案和提示音都单独一套
+        private void NotifyExhausted(string windowName, string soundFile)
+        {
+            string body = L.F("{0}额度已耗尽", windowName);
+            ShowToast(L.T("额度提醒"), body, soundFile);
+            Log("额度耗尽 -> " + body);
+        }
+
+        // 自绘弹窗，同时播放 exe 同目录里的提示音
+        private void ShowToast(string title, string body, string soundFile)
+        {
+            try
+            {
+                if (toast != null)
+                {
+                    try { toast.Close(); toast.Dispose(); } catch { }
+                    toast = null;
+                }
+                toast = new ToastForm(title, body);
+                toast.Show();
+            }
+            catch (Exception ex)
+            {
+                Log("弹窗失败：" + ex.Message);
+            }
+            PlayNotifySound(soundFile);
+        }
+
+        private void PlayNotifySound(string soundFile)
+        {
+            try
+            {
+                string wav = Path.Combine(root, soundFile);
+                if (!File.Exists(wav)) wav = Path.Combine(root, "notify.wav");   // 缺文件退回默认音
+                if (!File.Exists(wav)) return;
+                System.Media.SoundPlayer sp;
+                if (players == null) players = new System.Collections.Generic.Dictionary<string, System.Media.SoundPlayer>();
+                if (!players.TryGetValue(wav, out sp))
+                {
+                    sp = new System.Media.SoundPlayer(wav);
+                    sp.Load();   // 预载，避免第一次播放卡一下
+                    players[wav] = sp;
+                }
+                sp.Play();
+            }
+            catch (Exception ex)
+            {
+                Log("提示音失败：" + ex.Message);
+            }
+        }
+
+        // ---------- 绿色版：数据目录 / 内嵌 js / 找 node ----------
+
+        // 优先用 exe 所在目录（便携）；写不进去（比如放在 Program Files）就退到 %APPDATA%
+        private static string ResolveDataDir()
+        {
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+                if (!string.IsNullOrEmpty(exeDir) && Directory.Exists(exeDir))
+                {
+                    string probe = Path.Combine(exeDir, ".write-test");
+                    File.WriteAllText(probe, "1");
+                    File.Delete(probe);
+                    return exeDir;
+                }
+            }
+            catch { }
+            string appData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "CodexQuotaTray");
+            try { Directory.CreateDirectory(appData); } catch { }
+            return appData;
+        }
+
+        // quota.js 编译时用 /resource 打进 exe 里了。文件不在就解出来，
+        // 这样别人只需要一个 exe，不用再带一个 .js。
+        private void EnsureQuotaJs()
+        {
+            try
+            {
+                if (File.Exists(quotaJs)) return;
+                var asm = System.Reflection.Assembly.GetExecutingAssembly();
+                using (var s = asm.GetManifestResourceStream("quota.js"))
+                {
+                    if (s == null) return;
+                    using (var fs = File.Create(quotaJs))
+                    {
+                        s.CopyTo(fs);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try { Log("释放内嵌 quota.js 失败：" + ex.Message); } catch { }
+            }
+        }
+
+        // 找 node：便携目录 → 系统装的 → Codex 自带的运行时（装了 Codex 就一定有）
+        private static string FindNode()
+        {
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+                string local = Path.Combine(exeDir, "node.exe");
+                if (File.Exists(local)) return local;
+            }
+            catch { }
+
+            string p = @"C:\Program Files\nodejs\node.exe";
+            if (File.Exists(p)) return p;
+
+            // Codex 桌面版自带的 node 运行时（多个版本时取最新那个）
+            try
+            {
+                string rt = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"OpenAI\Codex\runtimes\cua_node");
+                if (Directory.Exists(rt))
+                {
+                    string best = null;
+                    DateTime bestTime = DateTime.MinValue;
+                    foreach (string d in Directory.GetDirectories(rt))
+                    {
+                        string cand = Path.Combine(d, @"bin\node.exe");
+                        if (!File.Exists(cand)) continue;
+                        DateTime t = File.GetLastWriteTimeUtc(cand);
+                        if (t > bestTime) { bestTime = t; best = cand; }
+                    }
+                    if (best != null) return best;
+                }
+            }
+            catch { }
+
+            string alt = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                @".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe");
+            if (File.Exists(alt)) return alt;
+            return "node.exe";
+        }
+
+        // ---------- 后台线程：定期查询 ----------
+        private void WorkerLoop()
+        {
+            while (!stopWorker.WaitOne(0))
+            {
+                DateTime started = DateTime.UtcNow;
+                QuotaResult r = Query();
+                lock (gate)
+                {
+                    pending = r;
+                    hasPending = true;
+                }
+                // 按固定节拍走：查询本身要花两三秒，这段要算进去，否则实际间隔会变成「5 秒 + 查询耗时」
+                int waitMs = PrimaryEverySec * 1000 - (int)(DateTime.UtcNow - started).TotalMilliseconds;
+                if (waitMs < 300) waitMs = 300;
+                int idx = WaitHandle.WaitAny(new WaitHandle[] { refreshNow, stopWorker }, waitMs);
+                if (idx == 0) refreshNow.Reset();
+                if (idx == 1) return;
+            }
+        }
+
+        private QuotaResult Query()
+        {
+            var r = new QuotaResult();
+            try
+            {
+                if (!File.Exists(quotaJs))
+                {
+                    r.error = L.T("找不到 quota.js");
+                    return r;
+                }
+                var psi = new ProcessStartInfo(nodeExe, "\"" + quotaJs + "\"");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.StandardOutputEncoding = Encoding.UTF8;
+                psi.StandardErrorEncoding = Encoding.UTF8;
+
+                using (var p = Process.Start(psi))
+                {
+                    string outp = p.StandardOutput.ReadToEnd();
+                    p.StandardError.ReadToEnd();
+                    if (!p.WaitForExit(20000))
+                    {
+                        try { p.Kill(); } catch { }
+                        r.error = L.T("查询超时");
+                        return r;
+                    }
+                    string line = outp.Trim();
+                    if (line.Length == 0)
+                    {
+                        r.error = L.T("查询无输出");
+                        return r;
+                    }
+                    var ser = new JavaScriptSerializer();
+                    var parsed = ser.Deserialize<QuotaResult>(line);
+                    if (parsed == null)
+                    {
+                        r.error = L.T("返回格式异常");
+                        return r;
+                    }
+                    return parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                r.error = ex.Message;
+                return r;
+            }
+        }
+
+        // ---------- UI 线程：取结果并刷新显示 ----------
+        private void PumpResults()
+        {
+            QuotaResult r = null;
+            lock (gate)
+            {
+                if (hasPending)
+                {
+                    r = pending;
+                    pending = null;
+                    hasPending = false;
+                }
+            }
+            if (r == null) return;
+
+            if (!r.ok)
+            {
+                lastError = string.IsNullOrEmpty(r.error) ? L.T("查询失败，稍后重试") : r.error;
+                Log("查询失败：" + lastError);
+                if (!hasData) UpdateUi();
+                return;
+            }
+
+            lastError = "";
+            hasData = true;
+            plan = r.plan == null ? "" : r.plan;
+
+            if (r.primary != null && r.primary.used >= 0)
+            {
+                // 只有"确实是个短窗口"才当 5 小时额度用。
+                // PRO 100/200/500 官方说明没有 5 小时限额；万一它的 primary 其实是周额度
+                // （窗口长度超过 1 天），这里要能识别出来，否则上下两段会显示同一个数字。
+                if (r.primary.windowMins > 1440)
+                {
+                    primaryUsed = -1;
+                }
+                else
+                {
+                    primaryUsed = r.primary.used;
+                    primaryReset = r.primary.resetsAt;
+                }
+            }
+
+            // 7 天额度变化慢，每 5 分钟才更新一次显示
+            bool needSecondary = secondaryShownAt == DateTime.MinValue ||
+                (DateTime.UtcNow - secondaryShownAt).TotalSeconds >= SecondaryEverySec;
+            if (needSecondary && r.secondary != null && r.secondary.used >= 0)
+            {
+                secondaryUsed = r.secondary.used;
+                secondaryReset = r.secondary.resetsAt;
+                if (r.secondary.windowMins > 0)
+                    secondaryDays = (int)Math.Round(r.secondary.windowMins / 1440.0);
+                secondaryShownAt = DateTime.UtcNow;
+            }
+
+            // 兜底：有些返回结构会把唯一的周额度放在 primary、secondary 留空。
+            // 不补这一手，Pro 会显示成"不限制 + 暂无数据"，等于什么都看不见。
+            if (secondaryUsed < 0 && r.primary != null && r.primary.used >= 0 && r.primary.windowMins > 1440)
+            {
+                secondaryUsed = r.primary.used;
+                secondaryReset = r.primary.resetsAt;
+                secondaryDays = (int)Math.Round(r.primary.windowMins / 1440.0);
+                secondaryShownAt = DateTime.UtcNow;
+            }
+
+            lastOkAt = DateTime.Now;
+
+            // 记下两个窗口的实际长度：PRO 系列本来就没有 5 小时档，
+            // 万一哪天返回结构变了，翻日志能直接看出来。
+            string winKey = "plan=" + plan
+                + " primary=" + (r.primary == null ? "null" : r.primary.windowMins + "min")
+                + " secondary=" + (r.secondary == null ? "null" : r.secondary.windowMins + "min");
+            if (winKey != lastWindows)
+            {
+                lastWindows = winKey;
+                Log("额度窗口：" + winKey);
+            }
+
+            string key = ((int)primaryUsed) + "/" + ((int)secondaryUsed);
+            if (key != lastLogged)
+            {
+                Log("额度更新：5小时=" + ((int)primaryUsed) + "% 7天=" + ((int)secondaryUsed) + "%");
+                lastLogged = key;
+            }
+
+            UpdateUi();
+            UpdateDesktopIcon(Math.Max(0.0, primaryUsed), Math.Max(0.0, secondaryUsed));
+            EvaluateNotify();
+        }
+
+        // ---------- 让桌面快捷方式的图标跟着托盘一起动 ----------
+        // 原理：把当前百分比渲染成新的 .ico，改写快捷方式的 IconLocation 指过去，
+        // 再让 Shell 刷新那一个图标。两个要点：
+        //   ① 每次用新文件名（Explorer 按路径缓存图标，同路径覆盖内容它经常不认）；
+        //      文件名里带本次运行时刻，避免重启后撞上旧缓存；
+        //   ② 只有百分比真的变了才写，避免白折腾和桌面闪。
+        private void UpdateDesktopIcon(double pUsed, double sUsed)
+        {
+            if (noDesktopTouch) return;
+            try
+            {
+                int p = (int)Math.Round(pUsed);
+                int s = (int)Math.Round(sUsed);
+                bool single = primaryUsed < 0 && secondaryUsed >= 0;   // Pro：只有一个额度，画单环
+                string key = (single ? "S" : "D") + p + "/" + s;
+                if (key == desktopIconKey) return;
+                desktopIconKey = key;
+
+                // 关闭开关：程序目录里放一个 disable-desktop-icon.txt 就不动桌面图标
+                if (File.Exists(Path.Combine(root, "disable-desktop-icon.txt"))) return;
+
+                string lnkPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    L.T("额度显示器.lnk"));
+                if (!File.Exists(lnkPath)) return;
+
+                desktopIconSeq++;
+                string icoPath = Path.Combine(root,
+                    "desktop-icon-" + desktopIconRunTag + "-" + desktopIconSeq + ".ico");
+                WriteIco(icoPath, pUsed, sUsed, single);
+
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) return;
+
+                object sh = Activator.CreateInstance(shellType);
+                try
+                {
+                    object lnk = shellType.InvokeMember("CreateShortcut",
+                        BindingFlags.InvokeMethod, null, sh, new object[] { lnkPath });
+                    Type lt = lnk.GetType();
+                    lt.InvokeMember("IconLocation", BindingFlags.SetProperty,
+                        null, lnk, new object[] { icoPath + ",0" });
+                    lt.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
+                    Marshal.ReleaseComObject(lnk);
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(sh);
+                }
+
+                // SHCNE_UPDATEITEM = 0x2000，SHCNF_PATHW = 0x0005
+                // 注意：只用「单项更新」，不要用 SHCNE_ASSOCCHANGED(0x08000000)——
+                // 那个会让 Explorer 刷新整个桌面，所有图标一起闪。
+                SHChangeNotify(0x2000, 0x0005, lnkPath, IntPtr.Zero);
+
+                Log("桌面图标已同步：" + key + "（" + Path.GetFileName(icoPath) + "）");
+                SaveDesktopIconState(key, icoPath);
+                CleanupOldDesktopIcons();
+            }
+            catch (Exception ex)
+            {
+                Log("桌面图标同步失败：" + ex.Message);
+            }
+        }
+
+        // 记下这次用的"数值 key + ico 路径"，供下次启动判断要不要重画
+        private void SaveDesktopIconState(string key, string icoPath)
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "desktop-icon-state.txt"),
+                    key + "\n" + icoPath + "\n");
+            }
+            catch (Exception ex)
+            {
+                Log("保存桌面图标状态失败：" + ex.Message);
+            }
+        }
+
+        // 启动时读回上次状态。三个条件都满足才认定"可以直接用"：
+        //   ① 上次的 ico 文件还在；② 快捷方式确实还指着它；③ 上次的数值 key 有效。
+        // 满足就把 desktopIconKey 预填成上次的值，于是第一次数据回来若没变就直接 return，
+        // 不写文件、不改 lnk、不通知 Shell —— 桌面完全不动。
+        private void LoadDesktopIconState()
+        {
+            try
+            {
+                string statePath = Path.Combine(root, "desktop-icon-state.txt");
+                if (!File.Exists(statePath)) return;
+
+                string[] parts = File.ReadAllText(statePath).Split('\n');
+                if (parts.Length < 2) return;
+                string key = parts[0].Trim();
+                string ico = parts[1].Trim();
+                if (key.Length == 0 || ico.Length == 0) return;
+                if (!File.Exists(ico)) return;
+
+                string lnkPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    "额度显示器.lnk");
+                if (!File.Exists(lnkPath)) return;
+
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) return;
+                object sh = Activator.CreateInstance(shellType);
+                try
+                {
+                    object lnk = shellType.InvokeMember("CreateShortcut",
+                        BindingFlags.InvokeMethod, null, sh, new object[] { lnkPath });
+                    Type lt = lnk.GetType();
+                    string loc = (string)lt.InvokeMember("IconLocation",
+                        BindingFlags.GetProperty, null, lnk, null);
+                    Marshal.ReleaseComObject(lnk);
+
+                    if (loc == null) return;
+                    string locPath = loc.Split(',')[0].Trim().Trim('"');
+                    if (!string.Equals(locPath, ico, StringComparison.OrdinalIgnoreCase)) return;
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(sh);
+                }
+
+                desktopIconKey = key;
+                Log("桌面图标沿用上次状态：" + key + "（不重绘）");
+            }
+            catch (Exception ex)
+            {
+                Log("读取桌面图标状态失败：" + ex.Message);
+            }
+        }
+
+        // 绿色版开箱即用：确保桌面有指向本 exe 的快捷方式。
+        // force=false 时已存在就不动；force=true 用于右键菜单"重建"。
+        private bool EnsureDesktopShortcut(bool force)
+        {
+            try
+            {
+                string lnkPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    L.T("额度显示器.lnk"));
+                if (File.Exists(lnkPath) && !force) return true;
+
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) return false;
+
+                object sh = Activator.CreateInstance(shellType);
+                try
+                {
+                    object lnk = shellType.InvokeMember("CreateShortcut",
+                        BindingFlags.InvokeMethod, null, sh, new object[] { lnkPath });
+                    Type lt = lnk.GetType();
+                    lt.InvokeMember("TargetPath", BindingFlags.SetProperty, null, lnk,
+                        new object[] { Application.ExecutablePath });
+                    lt.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, lnk,
+                        new object[] { root });
+                    lt.InvokeMember("IconLocation", BindingFlags.SetProperty, null, lnk,
+                        new object[] { Application.ExecutablePath + ",0" });
+                    lt.InvokeMember("Description", BindingFlags.SetProperty, null, lnk,
+                        new object[] { L.T("Codex 额度显示器，右下角托盘") });
+                    lt.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
+                    Marshal.ReleaseComObject(lnk);
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(sh);
+                }
+
+                Log("桌面快捷方式已创建：" + lnkPath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("创建桌面快捷方式失败：" + ex.Message);
+                return false;
+            }
+        }
+
+        private void ShowBalloon(string title, string text)
+        {
+            try
+            {
+                tray.ShowBalloonTip(5000, title, text, ToolTipIcon.Info);
+            }
+            catch { }
+        }
+
+        // 只保留最近 3 个 .ico（按修改时间）
+        private void CleanupOldDesktopIcons()
+        {
+            try
+            {
+                string currentIco = "desktop-icon-" + desktopIconRunTag + "-" + desktopIconSeq + ".ico";
+                var list = new System.Collections.Generic.List<FileInfo>();
+                foreach (string f in Directory.GetFiles(root, "desktop-icon-*.ico"))
+                {
+                    list.Add(new FileInfo(f));
+                }
+                list.Sort(delegate(FileInfo a, FileInfo b)
+                {
+                    return b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc);
+                });
+                for (int i = 3; i < list.Count; i++)
+                {
+                    if (string.Equals(list[i].Name, currentIco, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { list[i].Delete(); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateUi()
+        {
+            if (hasData)
+            {
+                // 悬停文案报「剩余」而不是「已用」——直接告诉他还剩多少，不用自己拿 100 去减。
+                // 取 100 - round(used)，保证是个整数、且与已用正好互补。
+                //
+                // 注意 used = -1 表示「这一档根本不存在」：PRO 100/200/500 官方明确
+                // 「没有 5 小时使用限额」，只有每周额度。这时上段不应该算出 101%，
+                // 而是标成「不限制」，图标上段画成全绿（= 剩余 100%，用不完）。
+                // Pro 只有周额度：没有短窗口 → 单环、单行悬停
+                if (primaryUsed < 0 && secondaryUsed >= 0)
+                {
+                    tray.Text = ClampTray(L.F("{0} 天 剩余 {1}%｜{2}", secondaryDays,
+                        100 - (int)Math.Round(secondaryUsed), CountdownTray(secondaryReset)));
+                    SetIcon(DrawSingleIcon(Math.Max(0.0, secondaryUsed), true));
+                }
+                else
+                {
+                    string line1, line2;
+                    if (primaryUsed < 0)
+                    {
+                        line1 = L.T("5 小时 不限制");
+                    }
+                    else
+                    {
+                        line1 = L.F("5 小时 剩余 {0}%｜{1}",
+                            100 - (int)Math.Round(primaryUsed), CountdownTray(primaryReset));
+                    }
+                    if (secondaryUsed < 0)
+                    {
+                        line2 = L.F("{0} 天 暂无数据", secondaryDays);
+                    }
+                    else
+                    {
+                        line2 = L.F("{0} 天 剩余 {1}%｜{2}", secondaryDays,
+                            100 - (int)Math.Round(secondaryUsed), CountdownTray(secondaryReset));
+                    }
+                    tray.Text = ClampTray(line1 + "\n" + line2);
+
+                    // 传 0（而不是 -1）给绘制函数：那一档不存在时按"剩余 100%"画成整圈绿
+                    SetIcon(DrawIcon(Math.Max(0.0, primaryUsed), Math.Max(0.0, secondaryUsed), true));
+                }
+            }
+            else
+            {
+                tray.Text = ClampTray(L.T("额度显示器") + " | "
+                    + (string.IsNullOrEmpty(lastError) ? L.T("正在读取额度…") : lastError)
+                    + "\n" + L.T("（右键可退出）"));
+                SetIcon(DrawIcon(0, 0, false));
+            }
+
+            // 状态快照（方便排查）
+            try
+            {
+                var sb = new StringBuilder();
+                sb.Append("{");
+                sb.Append("\"hasData\":").Append(hasData ? "true" : "false").Append(",");
+                sb.Append("\"primaryUsed\":").Append((int)Math.Round(primaryUsed)).Append(",");
+                sb.Append("\"secondaryUsed\":").Append((int)Math.Round(secondaryUsed)).Append(",");
+                sb.Append("\"primaryEvery\":").Append(PrimaryEverySec).Append(",");
+                sb.Append("\"secondaryEvery\":").Append(SecondaryEverySec).Append(",");
+                sb.Append("\"plan\":\"").Append(plan).Append("\",");
+                sb.Append("\"text\":\"").Append(Escape(tray.Text)).Append("\",");
+                sb.Append("\"error\":\"").Append(Escape(lastError)).Append("\"");
+                sb.Append("}");
+                File.WriteAllText(Path.Combine(root, "last.json"), sb.ToString(), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private static string Escape(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
+        }
+
+        // NotifyIcon.Text 最多 63 个字符，超了直接抛异常（英文比中文长，吃过这个亏）
+        private static string ClampTray(string s)
+        {
+            if (s == null) return "";
+            if (s.Length <= 63) return s;
+            return s.Substring(0, 62) + "…";
+        }
+
+        private void SetIcon(Icon icon)
+        {
+            Icon old = currentIcon;
+            tray.Icon = icon;
+            currentIcon = icon;
+            if (old != null) old.Dispose();
+        }
+
+        // ---------- 画图标：原版造型，针对托盘/桌面增强可见性 ----------
+        // 保留两段细圆弧、较宽断口、圆头和中心菱形；提亮轨道并恢复柔和三级配色。
+        // 桌面保持现有比例；托盘单独略加厚和放大中心。两者均不旋转。
+        private static readonly Color TrackColor = Color.FromArgb(120, 129, 139);    // 冷灰蓝 #78818B
+        private static readonly Color GreenColor = Color.FromArgb(120, 198, 171);  // 玉石绿 #78C6AB
+        private static readonly Color AmberColor = Color.FromArgb(226, 188, 114);  // 暖琥珀 #E2BC72
+        private static readonly Color LowColor = Color.FromArgb(229, 140, 136);    // 柔珊瑚 #E58C88
+        private static readonly Color DiamondColor = Color.FromArgb(129, 139, 149);// 中性冷灰 #818B95
+
+        private static Color LevelColor(double used)
+        {
+            if (used <= 25.0) return GreenColor;
+            if (used < 75.0) return AmberColor;
+            return LowColor; // 剩余 <=25%，即已用 >=75%，按用户要求进入红色。
+        }
+
+        private struct GaugeArc
+        {
+            public double Start, Span, Direction, StartX, StartY, EndX, EndY;
+        }
+
+        private static GaugeArc MakeGaugeArc(double radius, double startDeg, double spanDeg, double direction)
+        {
+            double start = startDeg * Math.PI / 180.0;
+            double span = spanDeg * Math.PI / 180.0;
+            double end = start + direction * span;
+            return new GaugeArc { Start = start, Span = span, Direction = direction,
+                StartX = radius * Math.Cos(start), StartY = radius * Math.Sin(start),
+                EndX = radius * Math.Cos(end), EndY = radius * Math.Sin(end) };
+        }
+
+        // 到圆弧中心线的距离；端点采用真圆帽，与原版细线描边一致。
+        private static double ArcDistanceSquared(GaugeArc arc, double x, double y, double angle, double radialDistance2)
+        {
+            double traveled = arc.Direction * (angle - arc.Start);
+            while (traveled < 0.0) traveled += Math.PI * 2.0;
+            while (traveled >= Math.PI * 2.0) traveled -= Math.PI * 2.0;
+            if (traveled <= arc.Span) return radialDistance2;
+            double sx = x - arc.StartX, sy = y - arc.StartY;
+            double ex = x - arc.EndX, ey = y - arc.EndY;
+            return Math.Min(sx * sx + sy * sy, ex * ex + ey * ey);
+        }
+
+        public static Bitmap RenderGauge(int size, double pUsed, double sUsed, bool hasData)
+        {
+            return RenderGaugeCore(size, pUsed, sUsed, hasData, false);
+        }
+
+        internal static Bitmap RenderTrayGauge(int size, double pUsed, double sUsed, bool hasData)
+        {
+            return RenderGaugeCore(size, pUsed, sUsed, hasData, true);
+        }
+
+        private static Bitmap RenderGaugeCore(int size, double pUsed, double sUsed, bool hasData, bool tray)
+        {
+            var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            double center = size / 2.0;
+            // 托盘使用 32px 后由系统缩小，和 16/24px 资源一并做小尺寸光学校正。
+            // 加粗时向内收，外径保持原样，避免裁边或把原版造型撑大。
+            double halfStroke = size * (tray ? 1.5 : size <= 32 ? 1.3 : 1.15) / 24.0;
+            double radius = size * (tray ? 12.0 : 11.9) / 24.0 - halfStroke;
+            double halfStroke2 = halfStroke * halfStroke;
+            double diamond = size * (tray ? 5.4 : 5.1) / 24.0;
+            double p = NormalizeUsed(pUsed, hasData), s = NormalizeUsed(sUsed, hasData);
+            // 截图中的上弧约 100°、下弧约 200°；两侧角间隔各约 30°。
+            GaugeArc top = MakeGaugeArc(radius, -40.0, 100.0, -1.0);
+            GaugeArc bottom = MakeGaugeArc(radius, -10.0, 200.0, 1.0);
+            GaugeArc topColor = MakeGaugeArc(radius, -40.0 - 100.0 * p / 100.0, 100.0 * (1.0 - p / 100.0), -1.0);
+            GaugeArc bottomColor = MakeGaugeArc(radius, -10.0 + 200.0 * s / 100.0, 200.0 * (1.0 - s / 100.0), 1.0);
+            Color pColor = LevelColor(p), sColor = LevelColor(s);
+            int samples = size <= 48 ? 8 : 4;
+            int count = samples * samples;
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                int coverage = 0, red = 0, green = 0, blue = 0;
+                for (int sy = 0; sy < samples; sy++)
+                for (int sx = 0; sx < samples; sx++)
+                {
+                    double dx = x + (sx + 0.5) / samples - center;
+                    double dy = y + (sy + 0.5) / samples - center;
+                    Color color;
+                    if (Math.Abs(dx) + Math.Abs(dy) <= diamond) color = DiamondColor;
+                    else
+                    {
+                        double r = Math.Sqrt(dx * dx + dy * dy);
+                        if (Math.Abs(r - radius) > halfStroke) continue;
+                        double angle = Math.Atan2(dy, dx);
+                        double radial2 = (r - radius) * (r - radius);
+                        bool upper = ArcDistanceSquared(top, dx, dy, angle, radial2) <= halfStroke2;
+                        if (!upper && ArcDistanceSquared(bottom, dx, dy, angle, radial2) > halfStroke2) continue;
+                        bool colored = hasData && (upper ? p < 100.0 && ArcDistanceSquared(topColor, dx, dy, angle, radial2) <= halfStroke2
+                            : s < 100.0 && ArcDistanceSquared(bottomColor, dx, dy, angle, radial2) <= halfStroke2);
+                        color = colored ? (upper ? pColor : sColor) : TrackColor;
+                    }
+                    coverage++; red += color.R; green += color.G; blue += color.B;
+                }
+                if (coverage != 0) bmp.SetPixel(x, y, Color.FromArgb(
+                    (coverage * 255 + count / 2) / count,
+                    (red + coverage / 2) / coverage, (green + coverage / 2) / coverage, (blue + coverage / 2) / coverage));
+            }
+            return bmp;
+        }
+
+        private static double NormalizeUsed(double used, bool hasData)
+        {
+            if (!hasData || double.IsNaN(used) || double.IsInfinity(used)) return 100.0;
+            return Math.Max(0.0, Math.Min(100.0, used));
+        }
+
+        // ---------- 单额度（Pro）：整圈一个环 ----------
+        // 线宽、半径、中心菱形、三级配色全部沿用双环那套算式，一个参数都不另设。
+        // 唯一区别：上下两段之间那两条 30° 断口被接上，变成连续的 360° 整圈。
+        // 消耗从 12 点开始顺时针走满一圈：灰色 = 已用，彩色 = 剩余（与界面一律报剩余一致）。
+        internal static Bitmap RenderSingleGauge(int size, double used, bool hasData, bool tray)
+        {
+            var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            double center = size / 2.0;
+            double halfStroke = size * (tray ? 1.5 : size <= 32 ? 1.3 : 1.15) / 24.0;
+            double radius = size * (tray ? 12.0 : 11.9) / 24.0 - halfStroke;
+            double halfStroke2 = halfStroke * halfStroke;
+            double diamond = size * (tray ? 5.4 : 5.1) / 24.0;
+            double u = NormalizeUsed(used, hasData);
+            // 整圈从 12 点（-90°）顺时针；已用多少度，剩余就从那里开始画多少度。
+            GaugeArc remain = MakeGaugeArc(radius, -90.0 + 360.0 * u / 100.0, 360.0 * (1.0 - u / 100.0), 1.0);
+            Color levelColor = LevelColor(u);
+            int samples = size <= 48 ? 8 : 4;
+            int count = samples * samples;
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                int coverage = 0, red = 0, green = 0, blue = 0;
+                for (int sy = 0; sy < samples; sy++)
+                for (int sx = 0; sx < samples; sx++)
+                {
+                    double dx = x + (sx + 0.5) / samples - center;
+                    double dy = y + (sy + 0.5) / samples - center;
+                    Color color;
+                    if (Math.Abs(dx) + Math.Abs(dy) <= diamond) color = DiamondColor;
+                    else
+                    {
+                        double r = Math.Sqrt(dx * dx + dy * dy);
+                        if (Math.Abs(r - radius) > halfStroke) continue;
+                        double angle = Math.Atan2(dy, dx);
+                        double radial2 = (r - radius) * (r - radius);
+                        bool colored = hasData && u < 100.0
+                            && ArcDistanceSquared(remain, dx, dy, angle, radial2) <= halfStroke2;
+                        color = colored ? levelColor : TrackColor;
+                    }
+                    coverage++; red += color.R; green += color.G; blue += color.B;
+                }
+                if (coverage != 0) bmp.SetPixel(x, y, Color.FromArgb(
+                    (coverage * 255 + count / 2) / count,
+                    (red + coverage / 2) / coverage, (green + coverage / 2) / coverage, (blue + coverage / 2) / coverage));
+            }
+            return bmp;
+        }
+
+        // 自检：用假数据把三档 × 两种套餐的触发过程跑一遍，写进文本，不弹任何窗口。
+        internal static void WriteNotifySelfTest(string path)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("额度提醒自检（只算逻辑，不弹窗）");
+            sb.AppendLine();
+            double[] seq = new double[] { 0, 10, 24, 25, 26, 40, 50, 60, 74, 75, 76, 88, 90, 91, 96 };
+            string[] names = new string[] { "低档", "中档", "高档" };
+            for (int lv = 0; lv <= 2; lv++)
+            {
+                sb.AppendLine("===== " + names[lv] + " =====");
+                sb.AppendLine("-- Plus：5 小时额度（按档位）--");
+                RunNotifySeq(sb, NotifyRules.Tier(lv), seq, 1000);
+                sb.AppendLine("-- Plus：7 天额度（固定，与档位无关）--");
+                RunNotifySeq(sb, NotifyRules.LongFixed(), seq, 2000);
+                sb.AppendLine("-- Pro：7 天额度（按档位）--");
+                RunNotifySeq(sb, NotifyRules.Tier(lv), seq, 3000);
+                sb.AppendLine();
+            }
+
+            sb.AppendLine("===== 抖动：24.9 → 25.1 → 24.9 → 25.2（只能响一次）=====");
+            RunNotifySeq(sb, NotifyRules.Tier(0), new double[] { 24.9, 25.1, 24.9, 25.2, 25.3 }, 4000);
+            sb.AppendLine();
+            sb.AppendLine("===== 重置：30 → 60 → 96 → 0 → 26 → 96（归零后要能重新响）=====");
+            RunNotifySeq(sb, NotifyRules.Tier(0), new double[] { 30, 60, 96, 0, 26, 96 }, 5000);
+            sb.AppendLine();
+            sb.AppendLine("===== 启动基线：直接开机处于 80% 时不应立刻弹 =====");
+            RunNotifySeq(sb, NotifyRules.Tier(0), new double[] { 80, 81, 96 }, 6000);
+
+            sb.AppendLine();
+            sb.AppendLine("===== 耗尽：98 → 100 只响一次，重复 100 不再响，归零后能再响 =====");
+            RunNotifySeq(sb, NotifyRules.Tier(0), new double[] { 98, 100, 100, 100, 0, 100 }, 7000);
+
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        }
+
+        private static void RunNotifySeq(StringBuilder sb, int[] th, double[] seq, double resetsAt)
+        {
+            NotifyWindow w = new NotifyWindow();
+            w.thresholds = th;
+            sb.Append("  阈值[");
+            for (int i = 0; i < th.Length; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append(th[i]);
+            }
+            sb.Append("]  ");
+            foreach (double v in seq)
+            {
+                int t = w.Fire(v, resetsAt);
+                sb.Append(v.ToString("0.#"));
+                if (w.Exhausted) sb.Append("★耗尽");
+                else if (t > 0) sb.Append("★响(" + t + "%)");
+                sb.Append("  ");
+            }
+            sb.AppendLine();
+        }
+
+        // 桌面测试脚本用：按类型弹一次，配上对应的提示音
+        internal static void RunToastDemo(string kind)
+        {
+            string body;
+            string sound;
+            L.AutoDetect();
+            if (kind == "5h-empty") { body = L.T("5 小时额度已耗尽"); sound = "notify-5h-empty.wav"; }
+            else if (kind == "7d-empty") { body = L.T("7 天额度已耗尽"); sound = "notify-7d-empty.wav"; }
+            else if (kind == "10") { body = L.T("5 小时额度只剩 10%｜30 分后恢复"); sound = "notify.wav"; }
+            else { body = L.T("5 小时额度还剩 75%｜2 小时后恢复"); sound = "notify.wav"; }
+
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            string dir = Path.GetDirectoryName(Application.ExecutablePath);
+            string wav = Path.Combine(dir, sound);
+            if (!File.Exists(wav)) wav = Path.Combine(dir, "notify.wav");
+            try
+            {
+                if (File.Exists(wav))
+                {
+                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wav);
+                    sp.Play();
+                }
+            }
+            catch { }
+
+            ToastForm f = new ToastForm(L.T("额度提醒"), body);
+            f.Show();
+            DateTime until = DateTime.Now.AddSeconds(9);
+            while (DateTime.Now < until)
+            {
+                Application.DoEvents();
+                Thread.Sleep(20);
+            }
+        }
+
+        // 真弹一次，让人看动画：滑进来 → 停 7 秒 → 滑回去
+        internal static void RunToastLive(string wavPath)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            try
+            {
+                if (!string.IsNullOrEmpty(wavPath) && File.Exists(wavPath))
+                {
+                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wavPath);
+                    sp.Play();
+                }
+            }
+            catch { }
+
+            L.AutoDetect();
+            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度只剩 10%｜1 小时 51 分后恢复"));
+            f.Show();
+            DateTime until = DateTime.Now.AddSeconds(9);
+            while (DateTime.Now < until)
+            {
+                Application.DoEvents();
+                Thread.Sleep(20);
+            }
+        }
+
+        // 出图：把自绘弹窗显示出来截图，同时放一次提示音，用于检查效果
+        internal static void WriteToastPreview(string dir, string wavPath)
+        {
+            Directory.CreateDirectory(dir);
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            try
+            {
+                if (File.Exists(wavPath))
+                {
+                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wavPath);
+                    sp.Play();
+                }
+            }
+            catch { }
+
+            L.AutoDetect();
+            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度还剩 19%｜2 小时 22 分后恢复"));
+            f.Show();
+            for (int i = 0; i < 24; i++)
+            {
+                Application.DoEvents();
+                Thread.Sleep(30);
+            }
+
+            Rectangle r = f.Bounds;
+            int pad = 16;
+            // 本进程没声明 DPI 感知，窗体坐标是逻辑像素；截屏要用物理像素，
+            // 所以按窗口 DPI 换算一下，否则截出来的位置会整体偏移。
+            double scale = 1.0;
+            try
+            {
+                uint dpi = GetDpiForWindow(f.Handle);
+                if (dpi >= 96) scale = dpi / 96.0;
+            }
+            catch { }
+
+            int pw = (int)Math.Round((r.Width + pad * 2) * scale);
+            int ph = (int)Math.Round((r.Height + pad * 2) * scale);
+            int px = (int)Math.Round((r.Left - pad) * scale);
+            int py = (int)Math.Round((r.Top - pad) * scale);
+            using (Bitmap bmp = new Bitmap(pw, ph))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(px, py, 0, 0, new Size(pw, ph));
+                bmp.Save(Path.Combine(dir, "弹窗效果.png"), ImageFormat.Png);
+            }
+
+            f.Close();
+            f.Dispose();
+        }
+
+        // 出图：现版双环 + Pro 单环的消耗过程，浅色与深色各一行，用于对照。
+        internal static void WriteProPreview(string dir)
+        {
+            Directory.CreateDirectory(dir);
+            string[] labels = new string[] { "现版 双环 40/40", "Pro 已用 40%", "Pro 已用 0%",
+                "Pro 已用 25%", "Pro 已用 50%", "Pro 已用 75%", "Pro 已用 100%" };
+            int cell = 200, gap = 16, labelH = 34;
+            int cols = labels.Length;
+            int width = cols * (cell + gap) + gap;
+            int rowH = cell + labelH;
+            int height = rowH * 2 + gap * 3;
+            Color[] bgs = new Color[] { Color.FromArgb(244, 245, 247), Color.FromArgb(32, 34, 38) };
+            Color[] fgs = new Color[] { Color.FromArgb(40, 44, 52), Color.FromArgb(228, 232, 238) };
+
+            using (var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            using (var g = Graphics.FromImage(bmp))
+            using (var font = new Font("Microsoft YaHei", 10.5f))
+            {
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                for (int row = 0; row < 2; row++)
+                {
+                    int top = gap + row * (rowH + gap);
+                    using (var bg = new SolidBrush(bgs[row]))
+                        g.FillRectangle(bg, 0, top - gap / 2, width, rowH + gap);
+                    for (int i = 0; i < cols; i++)
+                    {
+                        int left = gap + i * (cell + gap);
+                        double used = i == 1 ? 40.0 : (i - 2) * 25.0;
+                        using (Bitmap tile = i == 0
+                            ? RenderGauge(cell, 40, 40, true)
+                            : RenderSingleGauge(cell, used, true, false))
+                        {
+                            g.DrawImageUnscaled(tile, left, top);
+                        }
+                        using (var fg = new SolidBrush(fgs[row]))
+                            g.DrawString(labels[i], font, fg, left, top + cell + 6);
+                    }
+                }
+                bmp.Save(Path.Combine(dir, "Pro单环预览.png"), ImageFormat.Png);
+            }
+
+            // 托盘实际就是 32px，放大 6 倍看一眼：整圈在小尺寸下会不会糊成一坨。
+            int s32 = 32, zoom = 6, tw = s32 * zoom, tgap = 14, tlabel = 30;
+            string[] tlabels = new string[] { "现版 32px", "Pro 0%", "Pro 25%", "Pro 50%", "Pro 75%", "Pro 100%" };
+            int tcols = tlabels.Length;
+            int twidth = tcols * (tw + tgap) + tgap;
+            int theight = tw + tlabel + tgap * 2;
+            using (var tb = new Bitmap(twidth, theight, PixelFormat.Format32bppArgb))
+            using (var tg = Graphics.FromImage(tb))
+            using (var tfont = new Font("Microsoft YaHei", 9.5f))
+            {
+                tg.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                tg.Clear(Color.FromArgb(32, 34, 38));
+                tg.InterpolationMode = InterpolationMode.NearestNeighbor;
+                tg.PixelOffsetMode = PixelOffsetMode.Half;
+                for (int i = 0; i < tcols; i++)
+                {
+                    int left = tgap + i * (tw + tgap);
+                    double tu = (i - 1) * 25.0;
+                    using (Bitmap t = i == 0
+                        ? RenderTrayGauge(s32, 40, 40, true)
+                        : RenderSingleGauge(s32, tu, true, true))
+                    {
+                        tg.DrawImage(t, new Rectangle(left, tgap, tw, tw));
+                    }
+                    using (var fg = new SolidBrush(Color.FromArgb(228, 232, 238)))
+                        tg.DrawString(tlabels[i], tfont, fg, left, tgap + tw + 4);
+                }
+                tb.Save(Path.Combine(dir, "Pro单环-托盘尺寸.png"), ImageFormat.Png);
+            }
+        }
+
+        // 单额度（Pro）：托盘上就是一个环
+        private static Icon DrawSingleIcon(double used, bool hasData)
+        {
+            using (var bmp = RenderSingleGauge(32, used, hasData, true))
+            {
+                IntPtr h = bmp.GetHicon();
+                try
+                {
+                    using (var tmp = Icon.FromHandle(h))
+                    {
+                        return (Icon)tmp.Clone();
+                    }
+                }
+                finally
+                {
+                    DestroyIcon(h);
+                }
+            }
+        }
+
+        private static Icon DrawIcon(double pUsed, double sUsed, bool hasData)
+        {
+            var bmp = RenderTrayGauge(32, pUsed, sUsed, hasData);
+            try
+            {
+                IntPtr h = bmp.GetHicon();
+                try
+                {
+                    using (var tmp = Icon.FromHandle(h))
+                    {
+                        return (Icon)tmp.Clone();
+                    }
+                }
+                finally
+                {
+                    DestroyIcon(h);
+                }
+            }
+            finally
+            {
+                bmp.Dispose();
+            }
+        }
+
+        /// <summary>把同一个图案写成多尺寸 .ico，供 exe 和桌面快捷方式使用。</summary>
+        public static void WriteIco(string path, double pUsed, double sUsed, bool single)
+        {
+            int[] sizes = new int[] { 16, 24, 32, 48, 64, 128, 256 };
+            var pngs = new System.Collections.Generic.List<byte[]>();
+
+            foreach (int s in sizes)
+            {
+                using (var bmp = single ? RenderSingleGauge(s, sUsed, true, false) : RenderGauge(s, pUsed, sUsed, true))
+                using (var ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Png);
+                    pngs.Add(ms.ToArray());
+                }
+            }
+
+            using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write((short)0);                 // reserved
+                bw.Write((short)1);                 // type = icon
+                bw.Write((short)sizes.Length);      // count
+
+                int offset = 6 + 16 * sizes.Length;
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    int s = sizes[i];
+                    bw.Write((byte)(s >= 256 ? 0 : s));   // width
+                    bw.Write((byte)(s >= 256 ? 0 : s));   // height
+                    bw.Write((byte)0);                    // palette
+                    bw.Write((byte)0);                    // reserved
+                    bw.Write((short)1);                   // color planes
+                    bw.Write((short)32);                  // bpp
+                    bw.Write(pngs[i].Length);
+                    bw.Write(offset);
+                    offset += pngs[i].Length;
+                }
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    bw.Write(pngs[i]);
+                }
+                bw.Flush();
+            }
+        }
+
+        // ---------- 详情窗口 ----------
+        private void ShowDetail()
+        {
+            if (!hasData)
+            {
+                string body = string.IsNullOrEmpty(lastError)
+                    ? L.T("正在读取额度，请稍等一下。")
+                    : L.F("还没拿到额度数据。\r\n\r\n原因：{0}", lastError);
+                MessageBox.Show(body, L.T("Codex 额度"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            detailDark = IsDarkMode();
+            detailBg = detailDark ? Color.FromArgb(32, 32, 32) : SystemColors.Window;
+            detailFg = detailDark ? Color.FromArgb(235, 235, 235) : SystemColors.ControlText;
+
+            using (Form f = new Form())
+            {
+                f.Text = L.T("Codex 额度");
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterScreen;
+                f.MaximizeBox = false;
+                f.MinimizeBox = false;
+                f.ShowIcon = false;
+                f.Font = SystemFonts.MessageBoxFont;
+                f.ClientSize = new Size(420, 322);
+                f.BackColor = detailBg;
+                f.ForeColor = detailFg;
+                if (detailDark)
+                {
+                    f.HandleCreated += delegate { SetDarkTitleBar(f.Handle); };
+                }
+
+                Label planLabel = new Label();
+                planLabel.Text = L.F("套餐：{0}", plan);
+                planLabel.Location = new Point(18, 16);
+                planLabel.AutoSize = true;
+                planLabel.BackColor = detailBg;
+                planLabel.ForeColor = detailFg;
+                f.Controls.Add(planLabel);
+
+                // Pro 只有一个周额度：详情窗就一块，不摆"不限制"的空块
+                bool singleWindow = primaryUsed < 0 && secondaryUsed >= 0;
+                int btnY = 272;
+                if (singleWindow)
+                {
+                    f.ClientSize = new Size(420, 216);
+                    btnY = 162;
+                    f.Controls.Add(BuildQuotaGroup(L.F("{0} 天额度", secondaryDays), secondaryUsed, secondaryReset,
+                        new Point(16, 46), true));
+                }
+                else
+                {
+                    f.Controls.Add(BuildQuotaGroup(L.T("5 小时额度"), primaryUsed, primaryReset,
+                        new Point(16, 46), false));
+                    f.Controls.Add(BuildQuotaGroup(L.F("{0} 天额度", secondaryDays), secondaryUsed, secondaryReset,
+                        new Point(16, 156), true));
+                }
+
+                Button refreshBtn = new Button();
+                refreshBtn.Text = L.T("刷新");
+                refreshBtn.Location = new Point(212, btnY);
+                refreshBtn.Size = new Size(90, 32);
+                refreshBtn.DialogResult = DialogResult.OK;
+                f.Controls.Add(refreshBtn);
+
+                Button closeBtn = new Button();
+                closeBtn.Text = L.T("关闭");
+                closeBtn.Location = new Point(312, btnY);
+                closeBtn.Size = new Size(90, 32);
+                closeBtn.DialogResult = DialogResult.Cancel;
+                f.Controls.Add(closeBtn);
+
+                f.AcceptButton = refreshBtn;
+                f.CancelButton = closeBtn;
+
+                if (detailDark)
+                {
+                    Button[] btns = new Button[] { refreshBtn, closeBtn };
+                    foreach (Button b in btns)
+                    {
+                        b.FlatStyle = FlatStyle.Flat;
+                        b.FlatAppearance.BorderColor = Color.FromArgb(84, 84, 88);
+                        b.BackColor = Color.FromArgb(48, 48, 52);
+                        b.ForeColor = detailFg;
+                    }
+                }
+
+                if (f.ShowDialog() == DialogResult.OK) refreshNow.Set();
+            }
+        }
+
+        // 一块额度区域，全用系统标准控件（GroupBox + Label + ProgressBar）
+        private GroupBox BuildQuotaGroup(string title, double used, double reset, Point at, bool weekly)
+        {
+            GroupBox box = new GroupBox();
+            box.Text = title;
+            box.Location = at;
+            box.Size = new Size(388, 100);
+            box.BackColor = detailBg;
+            box.ForeColor = detailFg;
+
+            if (used < 0)
+            {
+                Label na = new Label();
+                na.Text = weekly ? L.T("暂无数据") : L.T("不限制（当前套餐不含这项限额）");
+                na.Location = new Point(16, 30);
+                na.AutoSize = true;
+                na.BackColor = detailBg;
+                na.ForeColor = detailFg;
+                box.Controls.Add(na);
+                return box;
+            }
+
+            int remain = (int)Math.Round(100 - used);
+            if (remain < 0) remain = 0;
+            if (remain > 100) remain = 100;
+
+            Label pct = new Label();
+            pct.Text = L.F("剩余 {0}%", remain);
+            pct.Location = new Point(16, 24);
+            pct.AutoSize = true;
+            pct.BackColor = detailBg;
+            pct.ForeColor = detailFg;
+            box.Controls.Add(pct);
+
+            ProgressBar bar = new ProgressBar();
+            bar.Minimum = 0;
+            bar.Maximum = 100;
+            bar.Value = remain;
+            bar.Location = new Point(16, 46);
+            bar.Size = new Size(356, 20);
+            box.Controls.Add(bar);
+
+            Label resetLabel = new Label();
+            resetLabel.Text = L.F("恢复：{0}", FormatReset(reset));
+            resetLabel.Location = new Point(16, 72);
+            resetLabel.AutoSize = true;
+            resetLabel.BackColor = detailBg;
+            resetLabel.ForeColor = detailFg;
+            box.Controls.Add(resetLabel);
+
+            return box;
+        }
+
+        // 托盘专用：英文去掉 "resets in" 前缀，否则两条加起来超过 63 字符
+        private static string CountdownTray(double unixSec)
+        {
+            if (L.Lang == "zh") return Countdown(unixSec);
+            bool ja = L.Lang == "ja";
+            if (unixSec <= 0) return ja ? "不明" : "unknown";
+            DateTime dt = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                .AddSeconds(unixSec).ToLocalTime();
+            TimeSpan left = dt - DateTime.Now;
+            if (left.TotalSeconds <= 0) return ja ? "まもなく" : "now";
+            if (left.TotalDays >= 1)
+                return ja
+                    ? "あと" + (int)left.TotalDays + "日" + left.Hours + "時間"
+                    : (int)left.TotalDays + "d " + left.Hours + "h";
+            if (left.TotalHours >= 1)
+                return ja
+                    ? "あと" + left.Hours + "時間" + left.Minutes + "分"
+                    : left.Hours + "h " + left.Minutes + "m";
+            return ja
+                ? "あと" + Math.Max(1, (int)left.TotalMinutes) + "分"
+                : Math.Max(1, (int)left.TotalMinutes) + "m";
+        }
+
+        // 悬停提示用：距离恢复还有多久（不带刷新频率）
+        private static string Countdown(double unixSec)
+        {
+            if (unixSec <= 0) return L.T("恢复时间未知");
+            DateTime dt = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                .AddSeconds(unixSec).ToLocalTime();
+            TimeSpan left = dt - DateTime.Now;
+            if (left.TotalSeconds <= 0) return L.T("即将恢复");
+
+            if (left.TotalDays >= 1) return L.F("{0} 天 {1} 小时后恢复", (int)left.TotalDays, left.Hours);
+            if (left.TotalHours >= 1) return L.F("{0} 小时 {1} 分后恢复", left.Hours, left.Minutes);
+            return L.F("{0} 分钟后恢复", Math.Max(1, (int)left.TotalMinutes));
+        }
+
+        private static double ToUnix(DateTime utc)
+        {
+            return (utc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        }
+
+        private static string FormatReset(double unixSec)
+        {
+            if (unixSec <= 0) return L.T("未知");
+            DateTime dt = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                .AddSeconds(unixSec).ToLocalTime();
+            TimeSpan left = dt - DateTime.Now;
+            if (left.TotalSeconds < 0) return L.F("{0}（已到期）", dt.ToString("MM-dd HH:mm"));
+
+            string remain;
+            if (left.TotalDays >= 1) remain = L.F("{0} 天 {1} 小时", (int)left.TotalDays, left.Hours);
+            else if (left.TotalHours >= 1) remain = L.F("{0} 小时 {1} 分", left.Hours, left.Minutes);
+            else remain = L.F("{0} 分钟", left.Minutes);
+
+            return L.F("{0}（还有 {1}）", dt.ToString("MM-dd HH:mm"), remain);
+        }
+
+        private void Log(string msg)
+        {
+            try
+            {
+                File.AppendAllText(logPath,
+                    DateTime.Now.ToString("MM-dd HH:mm:ss") + " " + msg + "\r\n",
+                    new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { stopWorker.Set(); } catch { }
+                try { uiTimer.Stop(); uiTimer.Dispose(); } catch { }
+                try { if (tray != null) { tray.Visible = false; tray.Dispose(); } } catch { }
+                try { if (currentIcon != null) currentIcon.Dispose(); } catch { }
+                Log("已退出");
+            }
+            base.Dispose(disposing);
+        }
+    }
+}
