@@ -1,12 +1,20 @@
-﻿# 改完 Program.cs 后，双击本文件（或用 PowerShell 运行）即可重新编译
-#   1. 先编译一个不带图标的 exe，用它生成多尺寸 icon.ico
-#   2. 再带图标编译一次（exe 和桌面快捷方式都因此换上新图标）
-#   3. 刷新桌面快捷方式并启动
+﻿# 编译脚本：生成 CodexQuotaTray.exe 并重新生成多尺寸 icon.ico
+#   1. 先编译一个不带图标的 exe，用它生成 icon.ico
+#   2. 再带图标编译一次
+#
+# 本脚本只做编译，不动系统上的任何东西：不结束进程、不建快捷方式、不自动启动。
+# 想顺手刷新桌面快捷方式并启动，加 -UpdateShortcut。
+
+param(
+    [string]$OutName = 'CodexQuotaTray.exe',
+    [switch]$UpdateShortcut
+)
+
 $ErrorActionPreference = 'Stop'
 
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$out = Join-Path $dir '额度显示器.exe'
+$out = Join-Path $dir $OutName
 $src = Join-Path $dir 'Program.cs'
 $ico = Join-Path $dir 'icon.ico'
 
@@ -16,11 +24,13 @@ if (-not (Test-Path $csc)) {
     exit 1
 }
 
-# 程序正在跑就先停掉，否则 exe 被占用无法覆盖
-Get-Process -Name '额度显示器' -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Host "停止正在运行的实例 (pid=$($_.Id))"
-    Stop-Process -Id $_.Id -Force
-    Start-Sleep -Milliseconds 500
+# 编译会占用 exe；只有本机自用刷新快捷方式时才会自动停掉旧实例
+if ($UpdateShortcut) {
+    Get-Process -Name 'CodexQuotaTray','额度显示器' -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "停止正在运行的实例 (pid=$($_.Id))"
+        Stop-Process -Id $_.Id -Force
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 $refs = @(
@@ -29,7 +39,7 @@ $refs = @(
     '/reference:System.Web.Extensions.dll'
 )
 
-# 把 quota.js 嵌进 exe：这样单文件 exe 就能跑，别人不用额外带 .js
+# 把 quota.js 嵌进 exe：这样单文件 exe 就能跑，不用额外带 .js
 $js = Join-Path $dir 'quota.js'
 $resArgs = @()
 if (Test-Path $js) { $resArgs = @("/resource:$js,quota.js") }
@@ -59,27 +69,24 @@ if (-not (Test-Path $out)) {
     exit 1
 }
 
-# 让桌面快捷方式立刻用上新图标（重写一遍 lnk + 通知 shell 刷新）
-try {
-    $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) '额度显示器.lnk'
-    $sh = New-Object -ComObject WScript.Shell
-    $lnk = $sh.CreateShortcut($lnkPath)
-    $lnk.TargetPath = $out
-    $lnk.WorkingDirectory = $dir
-    $lnk.IconLocation = "$out,0"
-    $lnk.Description = 'Codex 额度显示器（右下角托盘）'
-    $lnk.Save()
-
-    if (-not ('Win.ShellNotify' -as [type])) {
-        Add-Type -Namespace Win -Name ShellNotify -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, int flags, System.IntPtr item1, System.IntPtr item2);'
-    }
-    [Win.ShellNotify]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
-}
-catch {
-    Write-Host "快捷方式图标刷新失败（不影响使用）：$($_.Exception.Message)" -ForegroundColor Yellow
-}
-
 Write-Host ''
-Write-Host '编译成功，正在启动…' -ForegroundColor Green
+Write-Host "编译完成：$out" -ForegroundColor Green
+
+if (-not $UpdateShortcut) {
+    Write-Host '（只做了编译。要顺带刷新桌面快捷方式并启动，加 -UpdateShortcut）'
+    return
+}
+
+# 下面是本机自用才需要的动作，默认不做
+$lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CodexQuotaTray.lnk'
+$sh = New-Object -ComObject WScript.Shell
+$lnk = $sh.CreateShortcut($lnkPath)
+$lnk.TargetPath = $out
+$lnk.WorkingDirectory = $dir
+$lnk.IconLocation = "$out,0"
+$lnk.Description = 'Codex Quota Tray'
+$lnk.Save()
+
+Write-Host '正在启动…'
 Start-Process -FilePath $out
 Start-Sleep -Seconds 2

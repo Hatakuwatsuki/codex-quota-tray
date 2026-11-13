@@ -21,10 +21,10 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Codex 额度显示器")]
-[assembly: AssemblyProduct("Codex 额度显示器")]
-[assembly: AssemblyDescription("在通知区域显示 ChatGPT 5 小时 / 7 天额度")]
-[assembly: AssemblyVersion("1.6.0.0")]
+[assembly: AssemblyTitle("Codex Quota Tray")]
+[assembly: AssemblyProduct("Codex Quota Tray")]
+[assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
+[assembly: AssemblyVersion("1.6.1.0")]
 
 namespace QuotaTrayApp
 {
