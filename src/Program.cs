@@ -24,7 +24,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.6.1.0")]
+[assembly: AssemblyVersion("1.7.2.0")]
 
 namespace QuotaTrayApp
 {
@@ -92,6 +92,18 @@ namespace QuotaTrayApp
                 {
                     // 用法：--test-toast-live <wav路径>；真弹一次通知，让人看进场/退场动画
                     TrayContext.RunToastLive(args.Length >= 2 ? args[1] : null);
+                    return;
+                }
+                if (args[0] == "--find-codex")
+                {
+                    // 用法：--find-codex <输出文件>；只跑一次查找，把结果写下来
+                    TrayContext.WriteCodexProbe(args[1], args.Length >= 3 ? args[2] : null);
+                    return;
+                }
+                if (args[0] == "--preview-locate" && args.Length >= 3)
+                {
+                    // 用法：--preview-locate <目录> <png>；出识别界面的截图
+                    TrayContext.WriteLocatePreview(args[1], args[2]);
                     return;
                 }
                 if (args[0] == "--demo-toast")
@@ -316,6 +328,72 @@ namespace QuotaTrayApp
             Ja["5 小时额度还剩 75%｜2 小时后恢复"] = "5時間の残量: 75%・あと2時間でリセット";
             Ja["5 小时额度只剩 10%｜1 小时 51 分后恢复"] = "5時間の残量: 残りわずか10%・あと1時間51分でリセット";
             Ja["5 小时额度还剩 19%｜2 小时 22 分后恢复"] = "5時間の残量: 19%・あと2時間22分でリセット";
+            En["找不到 Codex"] = "Codex not found";
+            En["请先打开 Codex 桌面版并登录，然后点「自动搜寻」；找不到就点「浏览」手动指定 codex.exe。"] = "Open the Codex desktop app and sign in, then click Auto-detect. If that fails, click Browse and pick codex.exe yourself.";
+            En["浏览…"] = "Browse…";
+            En["自动搜寻"] = "Auto-detect";
+            En["正在搜寻…"] = "Searching…";
+            En["没找到，请点「浏览」手动指定"] = "Not found. Use Browse to pick it manually.";
+            En["已找到"] = "Found";
+            En["已选择"] = "Selected";
+            En["选择 codex.exe"] = "Select codex.exe";
+            En["所有程序"] = "All programs";
+            En["确定"] = "OK";
+            En["取消"] = "Cancel";
+            En["这个路径不存在，请重新选择 codex.exe。"] = "That path doesn't exist. Pick codex.exe again.";
+            En["识别 Codex…"] = "Locate Codex…";
+            Ja["找不到 Codex"] = "Codex が見つかりません";
+            Ja["请先打开 Codex 桌面版并登录，然后点「自动搜寻」；找不到就点「浏览」手动指定 codex.exe。"] = "Codex デスクトップ版を起動してサインインし、「自動検索」を押してください。見つからない場合は「参照」で codex.exe を指定してください。";
+            Ja["浏览…"] = "参照…";
+            Ja["自动搜寻"] = "自動検索";
+            Ja["正在搜寻…"] = "検索中…";
+            Ja["没找到，请点「浏览」手动指定"] = "見つかりません。「参照」で指定してください。";
+            Ja["已找到"] = "見つかりました";
+            Ja["已选择"] = "選択済み";
+            Ja["选择 codex.exe"] = "codex.exe を選択";
+            Ja["所有程序"] = "すべてのプログラム";
+            Ja["确定"] = "OK";
+            Ja["取消"] = "キャンセル";
+            Ja["这个路径不存在，请重新选择 codex.exe。"] = "そのパスは存在しません。codex.exe を選び直してください。";
+            En["找不到 codex.exe（Codex 桌面端没装？）"] = "codex.exe not found. Is the Codex desktop app installed?";
+            En["查询超时（Codex 没响应或网络不通）"] = "Query timed out. Codex is not responding, or the network is down.";
+            En["接口没返回额度数据"] = "Codex returned no quota data";
+            En["启动 codex 失败"] = "Could not start Codex";
+            Ja["找不到 codex.exe（Codex 桌面端没装？）"] = "codex.exe が見つかりません。Codex デスクトップ版は入っていますか？";
+            Ja["查询超时（Codex 没响应或网络不通）"] = "タイムアウトしました。Codex が応答しないか、ネットワークに繋がっていません。";
+            Ja["接口没返回额度数据"] = "Codex がクォータ情報を返しませんでした";
+            Ja["启动 codex 失败"] = "Codex を起動できませんでした";
+            En["点「自动搜寻」；不行就选 Codex 的安装文件夹，或直接选 codex.exe。"] = "Click Auto-detect. If that fails, pick the Codex install folder or the exe itself.";
+            En["选文件夹…"] = "Folder…";
+            En["选程序…"] = "Program…";
+            En["选择 Codex 的安装文件夹"] = "Select the Codex install folder";
+            En["这个文件夹里没找到 codex.exe"] = "No codex.exe in that folder";
+            En["没找到，选个文件夹或直接选程序"] = "Not found. Pick a folder or the program.";
+            Ja["点「自动搜寻」；不行就选 Codex 的安装文件夹，或直接选 codex.exe。"] = "「自動検索」を押してください。だめなら Codex のインストールフォルダか exe を選んでください。";
+            Ja["选文件夹…"] = "フォルダ…";
+            Ja["选程序…"] = "プログラム…";
+            Ja["选择 Codex 的安装文件夹"] = "Codex のインストールフォルダを選択";
+            Ja["这个文件夹里没找到 codex.exe"] = "そのフォルダに codex.exe はありません";
+            En["选择 Codex 的安装文件夹或 Codex.exe 以连接程序。"] = "Pick the Codex install folder or Codex.exe to connect.";
+            En["选择…"] = "Choose…";
+            En["选择 Codex 的安装文件夹或 Codex.exe"] = "Pick the Codex install folder or Codex.exe";
+            En["选择此文件夹"] = "Select this folder";
+            En["所有文件"] = "All files";
+            En["这里没找到 codex.exe"] = "No codex.exe here";
+            En["这里没找到 codex.exe，换个位置试试。"] = "No codex.exe here. Try another location.";
+            Ja["选择 Codex 的安装文件夹或 Codex.exe 以连接程序。"] = "Codex のインストールフォルダか Codex.exe を選んで接続します。";
+            Ja["选择…"] = "選択…";
+            Ja["选择 Codex 的安装文件夹或 Codex.exe"] = "Codex のフォルダまたは Codex.exe を選択";
+            Ja["选择此文件夹"] = "このフォルダを選択";
+            Ja["所有文件"] = "すべてのファイル";
+            Ja["这里没找到 codex.exe"] = "ここに codex.exe はありません";
+            Ja["这里没找到 codex.exe，换个位置试试。"] = "ここに codex.exe はありません。別の場所を試してください。";
+
+            Ja["没找到，选个文件夹或直接选程序"] = "見つかりません。フォルダかプログラムを選んでください。";
+
+
+            Ja["识别 Codex…"] = "Codex を指定…";
+
         }
 
         private static string Lookup(System.Collections.Generic.Dictionary<string, string> d, string zh)
@@ -364,6 +442,7 @@ namespace QuotaTrayApp
     {
         public int notifyLevel = 0;
         public string language = "auto";   // auto / zh / ja / en
+        public string codexPath = "";      // 手动指定或自动找到的 codex.exe
 
         public static AppSettings Load(string root)
         {
@@ -380,7 +459,11 @@ namespace QuotaTrayApp
                     if (eq <= 0) continue;
                     string k = line.Substring(0, eq).Trim().ToLowerInvariant();
                     string v = line.Substring(eq + 1).Trim().ToLowerInvariant();
-                    if (k == "language")
+                    if (k == "codexpath")
+                    {
+                        s.codexPath = v;
+                    }
+                    else if (k == "language")
                     {
                         if (v == "zh" || v == "ja" || v == "en" || v == "auto") s.language = v;
                     }
@@ -420,7 +503,9 @@ namespace QuotaTrayApp
                 string text = "# 额度提醒档位：off / low / medium / high" + Environment.NewLine
                             + "notifyLevel=" + Key() + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
-                            + "language=" + language + Environment.NewLine;
+                            + "language=" + language + Environment.NewLine
+                            + "# 找不到 Codex 时可手填 codex.exe 完整路径" + Environment.NewLine
+                            + (string.IsNullOrEmpty(codexPath) ? "" : "codexPath=" + codexPath + Environment.NewLine);
                 File.WriteAllText(Path.Combine(root, "settings.txt"), text, new UTF8Encoding(false));
             }
             catch { }
@@ -711,6 +796,355 @@ namespace QuotaTrayApp
         }
     }
 
+    // 找本机的 codex.exe。顺序：环境变量 → 正在运行的进程 → LocalAppData → 商店应用 → PATH。
+    // 正在运行的进程排第二，是因为 Codex 桌面版开着的时候这是最准的一条线索。
+    internal static class CodexFinder
+    {
+        public static string Find()
+        {
+            string p;
+            p = FromEnv(); if (p != null) return p;
+            p = FromRunning(); if (p != null) return p;
+            p = FromLocalAppDataBin(); if (p != null) return p;
+            p = FromAppx(); if (p != null) return p;
+            p = FromPath(); if (p != null) return p;
+            return "";
+        }
+
+        private static string FromEnv()
+        {
+            string v = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
+            return (!string.IsNullOrEmpty(v) && File.Exists(v)) ? v : null;
+        }
+
+        private static string FromRunning()
+        {
+            try
+            {
+                foreach (Process p in Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (p.ProcessName.IndexOf("codex", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        string path = null;
+                        try { path = p.MainModule.FileName; } catch { }
+                        if (!string.IsNullOrEmpty(path)
+                            && path.EndsWith("codex.exe", StringComparison.OrdinalIgnoreCase)
+                            && File.Exists(path))
+                        {
+                            return path;
+                        }
+                    }
+                    catch { }
+                    finally { try { p.Dispose(); } catch { } }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string FromLocalAppDataBin()
+        {
+            try
+            {
+                string root = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"OpenAI\Codex\bin");
+                return NewestIn(root);
+            }
+            catch { return null; }
+        }
+
+        // 商店版（MSIX）装在 WindowsApps 下面，路径带版本号，取最新的那个
+        private static string FromAppx()
+        {
+            try
+            {
+                string dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+                if (!Directory.Exists(dir)) return null;
+                string best = null;
+                DateTime bestTime = DateTime.MinValue;
+                foreach (string d in Directory.GetDirectories(dir, "OpenAI.Codex_*"))
+                {
+                    string cand = Path.Combine(d, @"app\resources\codex.exe");
+                    if (!File.Exists(cand)) continue;
+                    DateTime time = File.GetLastWriteTimeUtc(cand);
+                    if (time > bestTime) { bestTime = time; best = cand; }
+                }
+                return best;
+            }
+            catch { return null; }
+        }
+
+        // 用户指定一个文件夹时用：本层 → app\resources（商店版布局）→ 下一层子目录，取最新的
+        public static string FindInFolder(string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return null;
+
+            string[] direct =
+            {
+                Path.Combine(dir, "codex.exe"),
+                Path.Combine(dir, @"app\resources\codex.exe"),
+            };
+            foreach (string cand in direct)
+            {
+                if (File.Exists(cand)) return cand;
+            }
+
+            // 往下扫两层：够覆盖 bin\<hash>\codex.exe 和 商店版 app\resources\codex.exe，
+            // 又不会在用户误选 C:\ 的时候把整块盘翻一遍
+            string best = null;
+            DateTime bestTime = DateTime.MinValue;
+            int visited = 0;
+            DateTime deadline = DateTime.Now.AddSeconds(5);
+            System.Collections.Generic.Queue<string> queue = new System.Collections.Generic.Queue<string>();
+            queue.Enqueue(dir);
+            for (int depth = 0; depth <= 2 && queue.Count > 0; depth++)
+            {
+                int count = queue.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (visited++ > 800 || DateTime.Now > deadline) break;
+                    string cur = queue.Dequeue();
+                    string cand = Path.Combine(cur, "codex.exe");
+                    if (File.Exists(cand))
+                    {
+                        DateTime time = File.GetLastWriteTimeUtc(cand);
+                        if (time > bestTime) { bestTime = time; best = cand; }
+                        continue;
+                    }
+                    try
+                    {
+                        foreach (string d in Directory.GetDirectories(cur)) queue.Enqueue(d);
+                    }
+                    catch { }
+                }
+            }
+            return best;
+        }
+
+        private static string FromPath()
+        {
+            try
+            {
+                string pathVar = Environment.GetEnvironmentVariable("PATH");
+                if (string.IsNullOrEmpty(pathVar)) return null;
+                foreach (string part in pathVar.Split(';'))
+                {
+                    string dir = part.Trim();
+                    if (dir.Length == 0) continue;
+                    string cand = Path.Combine(dir, "codex.exe");
+                    if (File.Exists(cand)) return cand;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string NewestIn(string root)
+        {
+            if (!Directory.Exists(root)) return null;
+            string best = null;
+            DateTime bestTime = DateTime.MinValue;
+            string direct = Path.Combine(root, "codex.exe");
+            if (File.Exists(direct)) { best = direct; bestTime = File.GetLastWriteTimeUtc(direct); }
+            try
+            {
+                foreach (string d in Directory.GetDirectories(root))
+                {
+                    string cand = Path.Combine(d, "codex.exe");
+                    if (!File.Exists(cand)) continue;
+                    DateTime time = File.GetLastWriteTimeUtc(cand);
+                    if (time > bestTime) { bestTime = time; best = cand; }
+                }
+            }
+            catch { }
+            return best;
+        }
+    }
+
+    // 找不到 Codex 时弹的识别界面：自动搜寻 或 手动指定 codex.exe
+    internal class CodexLocateForm : Form
+    {
+        public string SelectedPath = "";
+
+        private readonly TextBox pathBox;
+        private readonly Label status;
+        private readonly bool dark;
+        private readonly Color bg;
+        private readonly Color fg;
+        private readonly Color sub;
+
+        public CodexLocateForm(string current)
+        {
+            dark = TrayContext.IsDarkMode();
+            bg = dark ? Color.FromArgb(32, 32, 32) : SystemColors.Window;
+            fg = dark ? Color.FromArgb(235, 235, 235) : SystemColors.ControlText;
+            sub = dark ? Color.FromArgb(170, 170, 170) : Color.FromArgb(96, 96, 96);
+
+            Text = "Codex";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterScreen;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowIcon = false;
+            Font = SystemFonts.MessageBoxFont;
+            ClientSize = new Size(460, 244);
+            BackColor = bg;
+            ForeColor = fg;
+            if (dark) HandleCreated += delegate { TrayContext.SetDarkTitleBar(Handle); };
+
+            Label title = new Label();
+            title.Text = L.T("找不到 Codex");
+            title.Font = new Font(Font.FontFamily, 11f, FontStyle.Bold);
+            title.Location = new Point(18, 16);
+            title.AutoSize = true;
+            title.BackColor = bg;
+            title.ForeColor = fg;
+            Controls.Add(title);
+
+            Label hint = new Label();
+            hint.Text = L.T("选择 Codex 的安装文件夹或 Codex.exe 以连接程序。");
+            hint.Location = new Point(18, 46);
+            hint.Size = new Size(424, 22);
+            hint.BackColor = bg;
+            hint.ForeColor = sub;
+            Controls.Add(hint);
+
+            pathBox = new TextBox();
+            pathBox.Location = new Point(18, 76);
+            pathBox.Size = new Size(424, 24);
+            pathBox.Text = current == null ? "" : current;
+            pathBox.BackColor = dark ? Color.FromArgb(48, 48, 52) : SystemColors.Window;
+            pathBox.ForeColor = fg;
+            Controls.Add(pathBox);
+
+            Button auto = new Button();
+            auto.Text = L.T("自动搜寻");
+            auto.Location = new Point(18, 110);
+            auto.Size = new Size(126, 30);
+            auto.Click += delegate { AutoFind(); };
+            Controls.Add(auto);
+
+            Button choose = new Button();
+            choose.Text = L.T("选择…");
+            choose.Location = new Point(154, 110);
+            choose.Size = new Size(126, 30);
+            choose.Click += delegate { Browse(); };
+            Controls.Add(choose);
+
+            status = new Label();
+            status.Text = "";
+            status.Location = new Point(18, 148);
+            status.AutoSize = true;
+            status.BackColor = bg;
+            status.ForeColor = sub;
+            Controls.Add(status);
+
+            Button ok = new Button();
+            ok.Text = L.T("确定");
+            ok.Location = new Point(258, 196);
+            ok.Size = new Size(88, 32);
+            ok.DialogResult = DialogResult.OK;
+            ok.Click += delegate { ValidateAndClose(); };
+            Controls.Add(ok);
+
+            Button cancel = new Button();
+            cancel.Text = L.T("取消");
+            cancel.Location = new Point(354, 196);
+            cancel.Size = new Size(88, 32);
+            cancel.DialogResult = DialogResult.Cancel;
+            Controls.Add(cancel);
+
+            AcceptButton = ok;
+            CancelButton = cancel;
+
+            if (dark)
+            {
+                foreach (Button b in new Button[] { auto, choose, ok, cancel })
+                {
+                    b.FlatStyle = FlatStyle.Flat;
+                    b.FlatAppearance.BorderColor = Color.FromArgb(84, 84, 88);
+                    b.BackColor = Color.FromArgb(48, 48, 52);
+                    b.ForeColor = fg;
+                }
+            }
+        }
+
+        private void AutoFind()
+        {
+            status.Text = L.T("正在搜寻…");
+            Application.DoEvents();
+            string found = CodexFinder.Find();
+            if (string.IsNullOrEmpty(found))
+            {
+                status.Text = L.T("没找到，选个文件夹或直接选程序");
+                return;
+            }
+            pathBox.Text = found;
+            status.Text = L.T("已找到");
+        }
+
+        // 用户可能给文件夹，也可能给 exe。判断出来再处理，不给用户出选择题。
+        // 路径合法返回 codex.exe 的完整路径，不合法返回 null
+        private string Resolve(string input)
+        {
+            string p = input == null ? "" : input.Trim().Trim('"');
+            if (p.Length == 0) return null;
+            if (Directory.Exists(p)) return CodexFinder.FindInFolder(p);
+            if (File.Exists(p)) return p;
+            return null;
+        }
+
+        // 一个对话框同时收文件和文件夹：
+        // 选中 exe 就直接返回它；进入某个文件夹后直接点「打开」，返回的是目录路径。
+        private void Browse()
+        {
+            using (OpenFileDialog dlg = new OpenFileDialog())
+            {
+                dlg.Title = L.T("选择 Codex 的安装文件夹或 Codex.exe");
+                dlg.Filter = "codex.exe|codex.exe|" + L.T("所有程序") + "|*.exe|" + L.T("所有文件") + "|*.*";
+                dlg.CheckFileExists = false;    // 允许选中文件夹
+                dlg.CheckPathExists = true;
+                dlg.ValidateNames = false;
+                dlg.FileName = L.T("选择此文件夹");
+
+                string cur = pathBox.Text == null ? "" : pathBox.Text.Trim();
+                if (cur.Length > 0)
+                {
+                    string dir = null;
+                    try { dir = Directory.Exists(cur) ? cur : Path.GetDirectoryName(cur); } catch { }
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir)) dlg.InitialDirectory = dir;
+                }
+
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+
+                string resolved = Resolve(dlg.FileName);
+                if (string.IsNullOrEmpty(resolved))
+                {
+                    status.Text = L.T("这里没找到 codex.exe");
+                    return;
+                }
+                pathBox.Text = resolved;
+                status.Text = L.T("已找到");
+            }
+        }
+
+        private void ValidateAndClose()
+        {
+            string resolved = Resolve(pathBox.Text);
+            if (string.IsNullOrEmpty(resolved))
+            {
+                MessageBox.Show(this, L.T("这里没找到 codex.exe，换个位置试试。"),
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                DialogResult = DialogResult.None;
+                return;
+            }
+            SelectedPath = resolved;
+        }
+    }
+
     internal class TrayContext : ApplicationContext
     {        [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool DestroyIcon(IntPtr handle);
@@ -732,7 +1166,7 @@ namespace QuotaTrayApp
         [DllImport("dwmapi.dll")]
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
-        private static void SetDarkTitleBar(IntPtr hwnd)
+        internal static void SetDarkTitleBar(IntPtr hwnd)
         {
             try
             {
@@ -921,7 +1355,7 @@ namespace QuotaTrayApp
 
         // 菜单项留引用：切语言时要就地改标题，不能重建整个菜单
         private ToolStripMenuItem menuRefresh, menuDetail, menuNotify;
-        private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang;
+        private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang, menuLocate;
         private ToolStripMenuItem[] menuLevels = new ToolStripMenuItem[4];
         private ToolStripMenuItem[] menuLangItems = new ToolStripMenuItem[4];
         private static readonly int[] LevelValues = new int[] { -1, 0, 1, 2 };
@@ -933,6 +1367,8 @@ namespace QuotaTrayApp
 
         // 调试预览模式：绝不碰桌面快捷方式和桌面图标
         private bool noDesktopTouch;
+        private bool needLocate;
+        private bool locateShown;
 
         // 桌面图标同步
         private string desktopIconKey = "";
@@ -948,6 +1384,7 @@ namespace QuotaTrayApp
             logPath = Path.Combine(root, "tray.log");
             settings = AppSettings.Load(root);
             ApplyLanguageSetting();
+            PrepareCodexPath();
             quotaJs = Path.Combine(root, "quota.js");
             EnsureQuotaJs();       // 单文件 exe：js 内嵌在程序里，缺了就解出来
             nodeExe = FindNode();
@@ -995,6 +1432,13 @@ namespace QuotaTrayApp
                 Log("开机自启动 -> " + (target ? "开" : "关"));
             };
 
+            menuLocate = new ToolStripMenuItem();
+            menuLocate.Click += delegate
+            {
+                locateShown = true;
+                ShowLocateDialog();
+            };
+
             menuShortcut = new ToolStripMenuItem();
             menuShortcut.Click += delegate
             {
@@ -1028,6 +1472,7 @@ namespace QuotaTrayApp
             menu.Items.Add(menuNotify);
             menu.Items.Add(menuAutoStart);
             menu.Items.Add(menuLang);
+            menu.Items.Add(menuLocate);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(menuShortcut);
             menu.Items.Add(new ToolStripSeparator());
@@ -1145,6 +1590,35 @@ namespace QuotaTrayApp
             worker.Start();
         }
 
+        // ---------- 找 Codex ----------
+        // 已经认过的路径还在就直接用；配置里没有就先自动找一个，找不到再等界面提示
+        private void PrepareCodexPath()
+        {
+            if (!string.IsNullOrEmpty(settings.codexPath) && File.Exists(settings.codexPath)) return;
+
+            string found = CodexFinder.Find();
+            if (!string.IsNullOrEmpty(found))
+            {
+                settings.codexPath = found;
+                settings.Save(root);
+                Log("自动识别到 Codex：" + found);
+                return;
+            }
+            needLocate = true;
+        }
+
+        private void ShowLocateDialog()
+        {
+            using (CodexLocateForm f = new CodexLocateForm(settings.codexPath))
+            {
+                if (f.ShowDialog() != DialogResult.OK) return;
+                settings.codexPath = f.SelectedPath;
+                settings.Save(root);
+                Log("手动识别 Codex：" + settings.codexPath);
+                refreshNow.Set();
+            }
+        }
+
         // ---------- 语言 ----------
         private void ApplyLanguageSetting()
         {
@@ -1175,6 +1649,7 @@ namespace QuotaTrayApp
             menuShortcut.Text = L.T("创建桌面快捷方式");
             menuExit.Text = L.T("退出");
             menuLang.Text = L.T("语言");
+            menuLocate.Text = L.T("识别 Codex…");
             menuLangItems[0].Text = L.T("自动");
             menuLangItems[1].Text = "中文";
             menuLangItems[2].Text = "日本語";
@@ -1444,6 +1919,11 @@ namespace QuotaTrayApp
                 psi.RedirectStandardError = true;
                 psi.StandardOutputEncoding = Encoding.UTF8;
                 psi.StandardErrorEncoding = Encoding.UTF8;
+                // 认到的 codex.exe 直接告诉 quota.js，省得它自己再猜一次
+                if (!string.IsNullOrEmpty(settings.codexPath) && File.Exists(settings.codexPath))
+                {
+                    psi.EnvironmentVariables["CODEX_CLI_PATH"] = settings.codexPath;
+                }
 
                 using (var p = Process.Start(psi))
                 {
@@ -1481,6 +1961,12 @@ namespace QuotaTrayApp
         // ---------- UI 线程：取结果并刷新显示 ----------
         private void PumpResults()
         {
+            if (needLocate && !locateShown)
+            {
+                locateShown = true;
+                needLocate = false;
+                ShowLocateDialog();
+            }
             QuotaResult r = null;
             lock (gate)
             {
@@ -1495,7 +1981,12 @@ namespace QuotaTrayApp
 
             if (!r.ok)
             {
-                lastError = string.IsNullOrEmpty(r.error) ? L.T("查询失败，稍后重试") : r.error;
+                lastError = string.IsNullOrEmpty(r.error) ? L.T("查询失败，稍后重试") : TranslateQuotaError(r.error);
+                // 掉线了（换机器、重装 Codex、路径变了）就再给一次识别机会
+                if (!locateShown && lastError.IndexOf("codex.exe", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    needLocate = true;
+                }
                 Log("查询失败：" + lastError);
                 if (!hasData) UpdateUi();
                 return;
@@ -1850,6 +2341,17 @@ namespace QuotaTrayApp
             catch { }
         }
 
+        // quota.js 的报错是中文硬编码，按已知前缀翻译；认不出来的原样返回
+        private static string TranslateQuotaError(string err)
+        {
+            if (string.IsNullOrEmpty(err)) return err;
+            if (err.StartsWith("找不到 codex.exe")) return L.T("找不到 codex.exe（Codex 桌面端没装？）");
+            if (err.StartsWith("查询超时")) return L.T("查询超时（Codex 没响应或网络不通）");
+            if (err.StartsWith("接口没返回额度数据")) return L.T("接口没返回额度数据") + err.Substring("接口没返回额度数据".Length);
+            if (err.StartsWith("启动 codex 失败")) return L.T("启动 codex 失败") + err.Substring("启动 codex 失败".Length);
+            return err;
+        }
+
         private static string Escape(string s)
         {
             if (s == null) return "";
@@ -2123,6 +2625,83 @@ namespace QuotaTrayApp
                 Application.DoEvents();
                 Thread.Sleep(20);
             }
+        }
+
+        // 探测本机 codex.exe 落在哪，写进文本，方便远程排查
+        internal static void WriteCodexProbe(string path, string folder)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (!string.IsNullOrEmpty(folder))
+            {
+                sb.AppendLine("folder=" + folder + " exists=" + Directory.Exists(folder));
+                string inFolder = CodexFinder.FindInFolder(folder);
+                sb.AppendLine("inFolder=" + (string.IsNullOrEmpty(inFolder) ? "(none)" : inFolder));
+            }
+            string found = CodexFinder.Find();
+            sb.AppendLine("found=" + (string.IsNullOrEmpty(found) ? "(none)" : found));
+            sb.AppendLine("CODEX_CLI_PATH=" + (Environment.GetEnvironmentVariable("CODEX_CLI_PATH") ?? "(unset)"));
+
+            string bin = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                @"OpenAI\Codex\bin");
+            sb.AppendLine("localappdata-bin=" + bin + " exists=" + Directory.Exists(bin));
+
+            string apps = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+            sb.AppendLine("windowsapps=" + apps + " exists=" + Directory.Exists(apps));
+
+            try
+            {
+                foreach (Process p in Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (p.ProcessName.IndexOf("codex", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        string exe = null;
+                        try { exe = p.MainModule.FileName; } catch { }
+                        sb.AppendLine("proc " + p.ProcessName + " pid=" + p.Id + " exe=" + (exe ?? "(denied)"));
+                    }
+                    catch { }
+                    finally { try { p.Dispose(); } catch { } }
+                }
+            }
+            catch { }
+
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        }
+
+        // 出识别界面的截图
+        internal static void WriteLocatePreview(string dir, string pngPath)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Directory.CreateDirectory(dir);
+            CodexLocateForm f = new CodexLocateForm("");
+            f.Show();
+            for (int i = 0; i < 20; i++) { Application.DoEvents(); Thread.Sleep(30); }
+
+            Rectangle r = f.Bounds;
+            int pad = 16;
+            double scale = 1.0;
+            try
+            {
+                uint dpi = GetDpiForWindow(f.Handle);
+                if (dpi >= 96) scale = dpi / 96.0;
+            }
+            catch { }
+
+            int pw = (int)Math.Round((r.Width + pad * 2) * scale);
+            int ph = (int)Math.Round((r.Height + pad * 2) * scale);
+            int px = (int)Math.Round((r.Left - pad) * scale);
+            int py = (int)Math.Round((r.Top - pad) * scale);
+            using (Bitmap bmp = new Bitmap(pw, ph))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(px, py, 0, 0, new Size(pw, ph));
+                bmp.Save(pngPath, ImageFormat.Png);
+            }
+            f.Close();
+            f.Dispose();
         }
 
         // 真弹一次，让人看动画：滑进来 → 停 7 秒 → 滑回去

@@ -48,6 +48,7 @@ Refresh / Quota details
 Quota alerts ▸ Off · Low · Medium · High
 Start with Windows
 Language ▸ Auto · 中文 · 日本語 · English
+Locate Codex…
 ──────
 Create desktop shortcut
 ──────
@@ -116,7 +117,7 @@ Debug switches (each exits without starting the tray):
 tray app  →  node quota.js  →  codex app-server --stdio  →  account/rateLimits/read
 ```
 
-`quota.js` locates `codex.exe` under `%LOCALAPPDATA%\OpenAI\Codex\bin`, starts the local app-server, and asks for rate limits. Node is taken from the exe folder, the system, or the runtime bundled with Codex — no separate Node install required.
+The app searches for `codex.exe` using `CODEX_CLI_PATH`, running processes, the default Codex and Microsoft Store locations, and PATH. If it cannot find Codex, use **Locate Codex…** to choose the executable or installation folder. `quota.js` starts the local app-server and asks for rate limits. Node is taken from the exe folder, the system, or the runtime bundled with Codex — no separate Node install required.
 
 The exe embeds `quota.js` as a resource and unpacks it next to itself on first run, which is why a single file is enough.
 
