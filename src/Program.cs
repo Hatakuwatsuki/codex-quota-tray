@@ -24,15 +24,61 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.7.2.0")]
+[assembly: AssemblyVersion("1.9.17.0")]
 
 namespace QuotaTrayApp
 {
     internal static class Program
     {
+        internal static string SettingsRequestName(string[] args)
+        {
+            string arg = args == null || args.Length == 0 ? "--settings" : args[0];
+            switch (arg)
+            {
+                case "--settings": return "CodexQuotaTraySettingsRequest";
+                case "--display-settings": return "CodexQuotaTrayDisplayRequest";
+                case "--connect-accounts": return "CodexQuotaTrayAccountsRequest";
+                case "--quota-details": return "CodexQuotaTrayDetailsRequest";
+                case "--exit": return "CodexQuotaTrayExitRequest";
+                case "--test-group-ui": return "CodexQuotaTrayGroupTestRequest";
+                default: return null;
+            }
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFileAttributes(string path);
+
+        private static int CheckAccountPaths()
+        {
+            try
+            {
+                string[] paths;
+                using (var input = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8))
+                    paths = new JavaScriptSerializer().Deserialize<string[]>(input.ReadToEnd());
+                foreach (string path in paths)
+                {
+                    if (!Path.IsPathRooted(path)) return 4;
+                    uint attrs = GetFileAttributes(path);
+                    if (attrs == UInt32.MaxValue)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != 2 && error != 3) return 4;
+                    }
+                    else if ((attrs & (uint)FileAttributes.ReparsePoint) != 0) return 3;
+                }
+                return 0;
+            }
+            catch (Exception) { return 4; }
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args != null && args.Length == 1 && args[0] == "--check-account-paths")
+            {
+                Environment.ExitCode = CheckAccountPaths();
+                return;
+            }
+
             // 命令行模式：给构建脚本用，不启动托盘
             if (args != null && args.Length >= 2)
             {
@@ -109,18 +155,132 @@ namespace QuotaTrayApp
                 if (args[0] == "--demo-toast")
                 {
                     // 用法：--demo-toast <5h-empty|7d-empty|25|10>；给桌面测试脚本用
-                    TrayContext.RunToastDemo(args.Length >= 2 ? args[1] : "25");
+                    TrayContext.RunToastDemo(args[1], args.Length >= 3 ? args[2] : "a");
                     return;
                 }
             }
 
+            if ((args == null || args.Length == 0) && PortableUpgrade.TryRun(Application.ExecutablePath)) return;
+
             bool createdNew;
             using (var mutex = new Mutex(true, "CodexQuotaTrayAppMutex", out createdNew))
             {
-                if (!createdNew) return; // 已经有一个在跑
+                if (!createdNew)
+                {
+                    string eventName = SettingsRequestName(args);
+                    if (eventName != null)
+                    {
+                        try { using (var request = EventWaitHandle.OpenExisting(eventName)) request.Set(); }
+                        catch (WaitHandleCannotBeOpenedException) { }
+                    }
+                    return;
+                }
+                if (args != null && args.Length > 0 && args[0] == "--exit") return;
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new TrayContext());
+                Environment.SetEnvironmentVariable("QUOTA_PATH_CHECKER", Application.ExecutablePath);
+                using (var context = new TrayContext()) Application.Run(context);
+            }
+        }
+    }
+
+    internal static class PortableUpgrade
+    {
+        internal static bool TryRun(string source)
+        {
+            Version incoming = Assembly.GetExecutingAssembly().GetName().Version;
+            if (!String.Equals(Path.GetFileName(source), "CodexQuotaTray-" + incoming + ".exe", StringComparison.OrdinalIgnoreCase))
+                return false;
+            using (var guard = new Mutex(false, "CodexQuotaTrayPortableUpgrade"))
+            {
+                try { if (!guard.WaitOne(0)) return true; }
+                catch (AbandonedMutexException) { }
+                try
+                {
+                    int session;
+                    using (Process current = Process.GetCurrentProcess()) session = current.SessionId;
+                    foreach (Process process in Process.GetProcesses())
+                    using (process)
+                    {
+                        string target = OlderSibling(process, source, incoming, session);
+                        if (target == null) continue;
+                        try { Replace(process, source, target); }
+                        catch (Exception error)
+                        {
+                            string explanation = L.Guess("auto") == "zh"
+                                ? "更新未完成。请关闭额度显示器后再试。"
+                                : "The update could not finish. Close Quota Display and try again.";
+                            MessageBox.Show(explanation + "\n\n" + error.Message, "Codex Quota Tray",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+                finally { guard.ReleaseMutex(); }
+            }
+        }
+
+        private static string OlderSibling(Process process, string source, Version incoming, int session)
+        {
+            try
+            {
+                string name = process.ProcessName;
+                if (process.SessionId != session) return null;
+                if (name != "额度显示器" && !name.Equals("CodexQuotaTray", StringComparison.OrdinalIgnoreCase)
+                    && !name.StartsWith("CodexQuotaTray-", StringComparison.OrdinalIgnoreCase)) return null;
+                string target = process.MainModule.FileName;
+                if (!String.Equals(Path.GetDirectoryName(target), Path.GetDirectoryName(source), StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(target, source, StringComparison.OrdinalIgnoreCase)) return null;
+                FileVersionInfo info = FileVersionInfo.GetVersionInfo(target);
+                Version previous;
+                return info.ProductName == "Codex Quota Tray" && Version.TryParse(info.FileVersion, out previous) &&
+                    previous.Major == 1 && previous < incoming ? target : null;
+            }
+            catch (System.ComponentModel.Win32Exception) { return null; }
+            catch (InvalidOperationException) { return null; }
+            catch (IOException) { return null; }
+        }
+
+        private static void Replace(Process process, string source, string target)
+        {
+            string pending = target + "." + Guid.NewGuid().ToString("N") + ".update";
+            string backup = pending + ".backup";
+            File.Copy(source, pending);
+            try
+            {
+                EventWaitHandle exit = null;
+                Version previous = Version.Parse(FileVersionInfo.GetVersionInfo(target).FileVersion);
+                bool cooperative = previous >= new Version(1, 8, 1, 0) &&
+                    EventWaitHandle.TryOpenExisting(Program.SettingsRequestName(new[] { "--exit" }), out exit);
+                if (cooperative) using (exit) exit.Set();
+                else process.CloseMainWindow();
+                if (!process.WaitForExit(cooperative ? 12000 : 2200))
+                {
+                    if (cooperative) throw new IOException("The running version did not respond to the exit request.");
+                    // Releases without an exit event have a tray-only message loop.
+                    process.Kill();
+                    if (!process.WaitForExit(6000)) throw new IOException("The old process did not exit.");
+                }
+
+                File.Replace(pending, target, backup);
+                try
+                {
+                    using (Process restarted = Process.Start(new ProcessStartInfo(target) {
+                        WorkingDirectory = Path.GetDirectoryName(target), UseShellExecute = false }))
+                    {
+                        if (restarted == null) throw new IOException("Could not restart Quota Display.");
+                    }
+                }
+                catch
+                {
+                    File.Replace(backup, target, null);
+                    throw;
+                }
+            }
+            finally
+            {
+                if (File.Exists(pending)) File.Delete(pending);
             }
         }
     }
@@ -154,6 +314,90 @@ namespace QuotaTrayApp
 
         static L()
         {
+            string[,] accountTexts = new string[,] {
+                { "账号", "Accounts", "アカウント" },
+                { "设置", "Settings", "設定" },
+                { "尚未绑定账号", "No accounts connected", "未接続" },
+                { "未绑定任何账号", "No linked accounts", "連携済みアカウントなし" },
+                { "未识别到 Codex", "Codex not found", "Codex が見つかりません" },
+                { "正在读取本地绑定…", "Reading local bindings…", "連携情報を読み込み中…" },
+                { "无法读取本地绑定，请手动刷新。", "Could not read local bindings. Refresh to retry.", "連携情報を読み取れません。手動で更新してください。" },
+                { "账号连接", "Account connections", "アカウント接続" },
+                { "托盘额度显示设置…", "Tray quota display settings…", "トレイ残量の表示設定…" },
+                { "托盘额度显示设置", "Tray quota display settings", "トレイ残量の表示設定" },
+                { "桌面快捷方式图标", "Desktop shortcut icon", "デスクトップショートカットのアイコン" },
+                { "选择桌面额度图标跟随的账号。", "Choose which account the desktop quota icon follows.", "デスクトップの残量アイコンに表示するアカウントを選びます。" },
+                { "Codex 查询程序…", "Codex query program…", "照会用の Codex を指定…" },
+                { "Codex 查询程序", "Codex query program", "照会用の Codex" },
+                { "仅定位查询程序，不会登录或切换账号。", "Only locates the query program. Does not sign in or switch accounts.", "照会プログラムの場所のみ指定します。ログインやアカウント切替は行いません。" },
+                { "最多连接五个账号，不切换 Codex 当前登录。", "Connect up to five accounts without switching the current Codex login.", "Codex の現在のログインを切り替えずに最大5つのアカウントを接続できます。" },
+                { "当前读取：已连接账号", "Reading: connected accounts", "読み取り元：接続済みアカウント" },
+                { "当前读取：Codex 当前登录", "Reading: current Codex login", "読み取り元：Codex の現在のログイン" },
+                { "使用各账号的独立登录，不读取 Codex 当前登录。", "Uses each account's separate sign-in, not the current Codex login.", "各アカウントの個別ログインを使用し、Codex の現在のログインは読み取りません。" },
+                { "连接账号后自动改读已连接账号。", "After connecting an account, reads the connected accounts instead.", "アカウント接続後は接続済みアカウントの読み取りに切り替わります。" },
+                { "账号列表读取失败，请重新打开窗口。", "Cannot read accounts. Close and reopen this window.", "アカウント一覧を取得できません。ウィンドウを開き直してください。" },
+                { "账号连接…", "Account connections…", "アカウント接続…" },
+                { "账号 {0}", "Account {0}", "アカウント {0}" },
+                { "显示设置…", "Display settings…", "表示設定…" },
+                { "账号显示设置", "Account display settings", "アカウント表示設定" },
+                { "托盘显示账号", "Accounts shown in the tray", "トレイに表示するアカウント" },
+                { "桌面来源", "Desktop icon follows", "デスクトップアイコンの参照先" },
+                { "托盘至少保留一个账号", "Keep at least one account in the tray.", "トレイに少なくとも1つのアカウントを残してください。" },
+                { "账号列表已变化，请重新打开设置。", "The account list changed. Reopen settings.", "アカウント一覧が変わりました。設定を開き直してください。" },
+                { "保存设置失败", "Could not save settings.", "設定を保存できませんでした。" },
+                { "账号列表读取失败，正在重试。", "Cannot read accounts. Retrying.", "アカウント一覧を取得できません。再試行中です。" },
+                { "请先关闭账号连接窗口。", "Close the account connections window first.", "先にアカウント接続ウィンドウを閉じてください。" },
+                { "账号连接组件加载失败，正在重试。", "Cannot load account connections. Retrying.", "アカウント接続を読み込めません。再試行中です。" },
+                { "所选账号暂未取得最新额度。", "Current quota is not available for the selected account.", "選択したアカウントの最新残量を取得できていません。" },
+                { "额度查询失败", "Quota update failed", "残量の更新に失敗しました" },
+                { "最后成功", "Last success", "最終成功" },
+                { "上次额度", "Last known quota", "前回の残量" },
+                { "暂无", "None yet", "まだありません" },
+                { "更新失败", "Update failed", "更新失敗" },
+                { "保存", "Save", "保存" },
+                { "{0}天 剩{1}%", "{0}d {1}% left", "{0}日 残り{1}%" },
+                { "5小时 剩{0}%", "5h {0}% left", "5時間 残り{0}%" },
+                { "5 小时 剩余 {0}%", "5h {0}% left", "5時間 残り{0}%" },
+                { "{0} 天 剩余 {1}%", "{0}d {1}% left", "{0}日 残り{1}%" },
+                { "最多连接五个账号，不切换 Codex 当前登录。托盘显示和桌面来源在显示设置中选择。", "Connect up to five accounts without switching the current Codex login. Choose tray accounts and desktop source in Display settings.", "Codex の現在のログインを切り替えずに最大5つのアカウントを接続できます。トレイ表示とデスクトップの参照先は表示設定で選びます。" },
+                { "未连接", "Not connected", "未接続" },
+                { "连接", "Connect", "接続" },
+                { "检查额度", "Check quota", "残量を確認" },
+                { "确认此账号", "Confirm account", "このアカウントを確認" },
+                { "重新选择", "Choose again", "選び直す" },
+                { "取消操作", "Cancel", "操作を中止" },
+                { "正在取消…", "Cancelling…", "中止しています…" },
+                { "正在检查…", "Checking…", "確認中…" },
+                { "待确认", "Awaiting confirmation", "確認待ち" },
+                { "已连接", "Connected", "接続済み" },
+                { "本次未读到额度", "Quota unavailable for this check", "今回は残量を取得できませんでした" },
+                { "连接失败，请重试。", "Connection failed. Try again.", "接続に失敗しました。再試行してください。" },
+                { "连接超时，请重试。", "Connection timed out. Try again.", "接続がタイムアウトしました。再試行してください。" },
+                { "操作已取消。", "Operation cancelled.", "操作を中止しました。" },
+                { "账号已连接，正在检查额度…", "Connected. Checking quota…", "接続しました。残量を確認中…" },
+                { "已取消，请重新连接。", "Cancelled. Connect again.", "中止しました。再接続してください。" },
+                { "已核对账号并读到额度。", "Account verified and quota received.", "アカウントと残量を確認しました。" },
+                { "暂无额度窗口数据", "No quota window data", "残量ウィンドウのデータがありません" },
+                { "{0} 小时", "{0} hours", "{0} 時間" },
+                { "{0}剩余 {1}%", "{0}: {1}% left", "{0} 残り {1}%" },
+                { "账号身份变化，已停止读取。", "Account identity changed. Reading stopped.", "アカウントが変わったため読み取りを停止しました。" },
+                { "这个账号已在另一处连接，请选择另一个。", "This account is already connected in the other slot. Choose another.", "このアカウントはもう一方に接続済みです。別のアカウントを選んでください。" },
+                { "另一个连接操作正在进行，请稍后重试。", "Another connection operation is running. Try again shortly.", "別の接続操作中です。しばらくして再試行してください。" },
+                { "请先连接此账号。", "Connect this account first.", "先にこのアカウントを接続してください。" },
+                { "Windows 凭据库不可用，已停止连接。", "Windows credential store unavailable. Connection stopped.", "Windows 資格情報ストアを使えないため接続を停止しました。" },
+                { "登录地址不可信，已取消。", "Untrusted sign-in URL. Cancelled.", "信頼できないログイン先のため中止しました。" },
+                { "无法打开官方登录页，请重试。", "Cannot open the official sign-in page. Try again.", "公式ログインページを開けません。再試行してください。" },
+                { "无法打开账号连接，请重试。", "Cannot open account connections. Try again.", "アカウント接続を開けません。再試行してください。" },
+                { "分别登录两个账号，不切换 Codex 当前登录。图标与原详情暂不改变。", "Sign in to each account separately. The current Codex login, icon and quota details stay unchanged.", "各アカウントに個別にログインします。Codex の現在のログイン、アイコン、残量の詳細は変更しません。" },
+                { "请在官方网页完成登录，然后回到这里核对账号。", "Sign in on the official page, then return here to verify the account.", "公式ページでログインし、ここでアカウントを確認してください。" },
+                { "请核对账号；正确就点“确认此账号”，否则点“重新选择”。", "Check the account, then confirm it or choose again.", "アカウントを確認し、正しければ確定、違えば選び直してください。" },
+                { "授权保存在本机 Windows 凭据库，不随程序复制。", "Authorization stays in this PC's Windows credential store; copying the app does not copy it.", "認証情報はこの PC の Windows 資格情報ストアに保存され、アプリと一緒にはコピーされません。" }
+            };
+            for (int i = 0; i < accountTexts.GetLength(0); i++)
+            {
+                En[accountTexts[i, 0]] = accountTexts[i, 1];
+                Ja[accountTexts[i, 0]] = accountTexts[i, 2];
+            }
             // ---------- 菜单与窗口 ----------
             En["额度显示器"] = "Quota Tray";
             En["刷新"] = "Refresh";
@@ -186,6 +430,19 @@ namespace QuotaTrayApp
             Ja["退出"] = "終了";
             Ja["语言"] = "言語";
             Ja["自动"] = "自動";
+
+            // ---------- 档位悬停说明（触发时额度还剩多少） ----------
+            En["不弹任何提醒"] = "No alerts";
+            En["剩 25% 和 10% 时各提醒一次"] = "Alerts once at 25% left and once at 10% left";
+            En["剩 75%、25%、10% 时各提醒一次"] = "Alerts at 75%, 25% and 10% left";
+            En["剩 75%、50%、25%、10% 时各提醒一次"] = "Alerts at 75%, 50%, 25% and 10% left";
+            En["7 天额度固定剩 25%、10%"] = "The 7-day quota always alerts at 25% and 10% left";
+
+            Ja["不弹任何提醒"] = "通知しません";
+            Ja["剩 25% 和 10% 时各提醒一次"] = "残り25%と10%の時に一度ずつ通知します";
+            Ja["剩 75%、25%、10% 时各提醒一次"] = "残り75%・25%・10%の時に通知します";
+            Ja["剩 75%、50%、25%、10% 时各提醒一次"] = "残り75%・50%・25%・10%の時に通知します";
+            Ja["7 天额度固定剩 25%、10%"] = "7日間の残量は常に残り25%・10%で通知します";
 
             // ---------- 托盘提示 ----------
             En["额度显示器｜正在读取额度…"] = "Quota Tray | Reading quota…";
@@ -441,8 +698,51 @@ namespace QuotaTrayApp
     internal class AppSettings
     {
         public int notifyLevel = 0;
+        public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
         public string codexPath = "";      // 手动指定或自动找到的 codex.exe
+        public bool codexLookupAttempted;
+        public bool bindingSetupDone;
+        internal bool HasCodex { get { return !String.IsNullOrEmpty(codexPath) && File.Exists(codexPath); } }
+
+        internal string DetectCodexOnce(string root, Func<string> find)
+        {
+            if (HasCodex || codexLookupAttempted) return null;
+            codexLookupAttempted = true;
+            codexPath = find() ?? "";
+            Save(root);
+            return codexPath;
+        }
+        private readonly System.Collections.Generic.Dictionary<string, int> accountLevels = new System.Collections.Generic.Dictionary<string, int>();
+        internal bool HasAccountLevel(string slot) { return accountLevels.ContainsKey(slot); }
+        internal int LevelFor(string slot)
+        {
+            int value;
+            return slot != null && accountLevels.TryGetValue(slot, out value) ? value : notifyLevel;
+        }
+        internal void SetAccountLevel(string slot, int level)
+        {
+            if (!DisplayPolicy.ValidSlot(slot) || level < -1 || level > 2) throw new ArgumentException("Invalid reminder preference");
+            accountLevels[slot] = level;
+        }
+        internal bool ApplyGlobalLevel(string root, int level)
+        {
+            if (level < -1 || level > 2) return false;
+            int previousDefault = notifyLevel;
+            var previousLevels = new System.Collections.Generic.Dictionary<string, int>(accountLevels);
+            notifyLevel = level;
+            accountLevels.Clear();
+            if (Save(root)) return true;
+            notifyLevel = previousDefault;
+            foreach (var previous in previousLevels) accountLevels.Add(previous.Key, previous.Value);
+            return false;
+        }
+
+        private static int ParseLevel(string value)
+        {
+            switch (value) { case "off": case "none": case "-1": return -1; case "medium": case "mid": case "1": return 1; case "high": case "2": return 2; default: return 0; }
+        }
+        private static string LevelKey(int value) { return value < 0 ? "off" : value == 1 ? "medium" : value >= 2 ? "high" : "low"; }
 
         public static AppSettings Load(string root)
         {
@@ -461,8 +761,12 @@ namespace QuotaTrayApp
                     string v = line.Substring(eq + 1).Trim().ToLowerInvariant();
                     if (k == "codexpath")
                     {
-                        s.codexPath = v;
+                        s.codexPath = line.Substring(eq + 1).Trim();
                     }
+                    else if (k == "theme") s.theme = UiTheme.Normalize(v);
+                    else if (k == "bindingsetupdone") s.bindingSetupDone = v == "true";
+                    else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
+                    else if (k.StartsWith("notify.") && DisplayPolicy.ValidSlot(k.Substring(7))) s.accountLevels[k.Substring(7)] = ParseLevel(v);
                     else if (k == "language")
                     {
                         if (v == "zh" || v == "ja" || v == "en" || v == "auto") s.language = v;
@@ -496,8 +800,9 @@ namespace QuotaTrayApp
             return L.T("低档");
         }
 
-        public void Save(string root)
+        public bool Save(string root)
         {
+            string temp = null;
             try
             {
                 string text = "# 额度提醒档位：off / low / medium / high" + Environment.NewLine
@@ -506,9 +811,23 @@ namespace QuotaTrayApp
                             + "language=" + language + Environment.NewLine
                             + "# 找不到 Codex 时可手填 codex.exe 完整路径" + Environment.NewLine
                             + (string.IsNullOrEmpty(codexPath) ? "" : "codexPath=" + codexPath + Environment.NewLine);
-                File.WriteAllText(Path.Combine(root, "settings.txt"), text, new UTF8Encoding(false));
+                text += "theme=" + UiTheme.Normalize(theme) + Environment.NewLine;
+                text += "bindingSetupDone=" + bindingSetupDone.ToString().ToLowerInvariant() + Environment.NewLine;
+                text += "codexLookupAttempted=" + codexLookupAttempted.ToString().ToLowerInvariant() + Environment.NewLine;
+                foreach (string slot in new string[] { "a", "b", "c", "d", "e" })
+                    if (accountLevels.ContainsKey(slot)) text += "notify." + slot + "=" + LevelKey(accountLevels[slot]) + Environment.NewLine;
+                string target = Path.Combine(root, "settings.txt");
+                temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(temp, text, new UTF8Encoding(false));
+                if (File.Exists(target)) File.Replace(temp, target, null);
+                else File.Move(temp, target);
+                return true;
             }
-            catch { }
+            catch { return false; }
+            finally
+            {
+                if (temp != null && File.Exists(temp)) try { File.Delete(temp); } catch { }
+            }
         }
     }
 
@@ -526,11 +845,15 @@ namespace QuotaTrayApp
             return new int[] { 75, 90 };
         }
 
-        // Plus 的 7 天额度固定两刀，不受档位影响：剩 25% 和剩 10%
-        public static int[] LongFixed()
+        // 7天独立规则；5小时的Tier保持原样。100%耗尽由NotifyWindow单独处理。
+        public static int[] LongTier(int level)
         {
-            return new int[] { 75, 90 };
+            if (level < 0) return new int[0];
+            if (level >= 2) return new int[] { 10, 20, 30, 40, 50, 60, 70, 80, 90 };
+            if (level == 1) return new int[] { 25, 50, 75, 90 };
+            return new int[] { 85, 95 };
         }
+        public static int[] LongFixed() { return LongTier(0); }
     }
 
     // 一个额度窗口的提醒状态。
@@ -599,12 +922,17 @@ namespace QuotaTrayApp
     // 但完全由我们自己画，不走系统通知中心，也不抢焦点。
     internal class ToastForm : Form
     {
-        private const int CardW = 380;
-        private const int CardH = 98;
+        private const int CardW = 376;
+        private const int TextInset = 27;
+        private const int CornerRadius = UiTheme.WindowRadius;
+        private const int BackdropTintAlpha = 51; // 20% neutral tint, 80% blurred background.
 
         private readonly string titleText;
         private readonly string bodyText;
-        private readonly bool dark;
+        private readonly string resetText;
+        private readonly string emailMask;
+        private readonly Color accountColor;
+        private bool layered = true;
         private readonly Font smallFont;
         private readonly Font titleFont;
         private readonly Font bodyFont;
@@ -622,21 +950,28 @@ namespace QuotaTrayApp
         private const int SlideOutMs = 200;
         private const int FrameMs = 15;
 
-        public ToastForm(string title, string body)
+        public ToastForm(string title, string body, string slot = null, string email = null)
         {
-            titleText = title;
-            bodyText = body;
-            dark = TrayContext.IsDarkMode();
-            smallFont = new Font("Microsoft YaHei UI", 9f);
-            titleFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
-            bodyFont = new Font("Microsoft YaHei UI", 10f);
+            int number = UiTheme.AccountNumber(slot);
+            titleText = number > 0 ? L.F("账号 {0}", number) + "  ·  " + title : title;
+            string[] lines = body.Split(new[] { '\n', '｜' }, 2);
+            bodyText = lines[0].Trim();
+            resetText = lines.Length > 1 ? lines[1].Trim() : "";
+            accountColor = UiTheme.AccountColor(slot);
+            emailMask = email != null && email.Length <= 128 &&
+                System.Text.RegularExpressions.Regex.IsMatch(email, @"^[A-Za-z0-9]{1,2}\*{3}@[A-Za-z0-9.\-]{1,123}$") ? email : "";
+            smallFont = new Font("Microsoft YaHei UI", 8.5f);
+            titleFont = new Font("Microsoft YaHei UI", 9.25f);
+            bodyFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
 
+            Text = titleText;
+            AccessibleName = titleText + " " + emailMask + " " + body;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(CardW, CardH);
-            BackColor = dark ? Color.FromArgb(44, 44, 44) : Color.FromArgb(250, 250, 250);
+            ClientSize = new Size(CardW, String.IsNullOrEmpty(resetText) ? 73 : 98);
+            BackColor = SystemInformation.HighContrast ? SystemColors.Window : UiTheme.Surface;
             DoubleBuffered = true;
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint
                 | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
@@ -647,10 +982,9 @@ namespace QuotaTrayApp
 
             // 位置固定：右下角，离屏幕边和任务栏各 16px；进场前先藏在屏幕右边缘外面
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            yPos = wa.Bottom - CardH - 16;
-            endX = wa.Right - CardW - 16;
+            yPos = wa.Bottom - Height - 16;
+            endX = wa.Right - Width - 16;
             Location = new Point(wa.Right, yPos);
-            Opacity = 0.0;
         }
 
         // 不抢焦点：弹出来的时候仍然可以继续打字
@@ -661,27 +995,75 @@ namespace QuotaTrayApp
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ExStyle |= 0x08000000;    // WS_EX_NOACTIVATE
-                cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW，给个系统投影
+                cp.ExStyle |= 0x08000000;  // WS_EX_NOACTIVATE
+                if (layered) cp.ExStyle |= 0x00080000; // WS_EX_LAYERED
                 return cp;
             }
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            try
-            {
-                int pref = 2;   // DWMWCP_ROUND，Win11 圆角
-                TrayContext.DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int));
-            }
-            catch { }
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            using (Bitmap backdrop = CaptureBackdrop())
+            using (Bitmap surface = RenderSurface(backdrop))
+            {
+                if (!UiLayeredSurface.Present(Handle, surface, Location, 255))
+                {
+                    layered = false;
+                    RecreateHandle();
+                    UiTheme.ClipRoundedWindow(this, CornerRadius);
+                    Invalidate();
+                }
+            }
             StartAnim(true);
+        }
+
+        private static bool CanSampleBackdrop()
+        {
+            if (SystemInformation.HighContrast || SystemInformation.TerminalServerSession) return false;
+            try
+            {
+                const string transparencyKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+                return !Object.Equals(Microsoft.Win32.Registry.GetValue(transparencyKey, "EnableTransparency", 1), 0);
+            }
+            catch (System.Security.SecurityException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        private Bitmap CaptureBackdrop()
+        {
+            if (!CanSampleBackdrop()) return null;
+            // Sample the destination before the toast enters. Only the blurred pixels are retained.
+            const int blurPadding = 14;
+            const int blurScale = 18;
+            Rectangle area = new Rectangle(endX, yPos, Width, Height);
+            area.Inflate(blurPadding, blurPadding);
+            try
+            {
+                using (var sample = new Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                using (var reduced = new Bitmap(Math.Max(1, area.Width / blurScale), Math.Max(1, area.Height / blurScale)))
+                using (var edges = new System.Drawing.Imaging.ImageAttributes())
+                {
+                    edges.SetWrapMode(WrapMode.TileFlipXY);
+                    using (Graphics capture = Graphics.FromImage(sample))
+                        capture.CopyFromScreen(area.Location, Point.Empty, area.Size);
+                    using (Graphics downsample = Graphics.FromImage(reduced))
+                    {
+                        downsample.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                        downsample.DrawImage(sample, new Rectangle(Point.Empty, reduced.Size),
+                            0, 0, sample.Width, sample.Height, GraphicsUnit.Pixel, edges);
+                    }
+                    var blurred = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (Graphics upsample = Graphics.FromImage(blurred))
+                    {
+                        upsample.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        upsample.DrawImage(reduced, new Rectangle(-blurPadding, -blurPadding, area.Width, area.Height),
+                            0, 0, reduced.Width, reduced.Height, GraphicsUnit.Pixel, edges);
+                    }
+                    return blurred;
+                }
+            }
+            catch (System.ComponentModel.Win32Exception) { return null; }
         }
 
         // 缓出曲线：起步快、收尾慢，跟系统通知的手感接近
@@ -709,12 +1091,10 @@ namespace QuotaTrayApp
             {
                 int x = (int)Math.Round(Screen.PrimaryScreen.WorkingArea.Right + (endX - Screen.PrimaryScreen.WorkingArea.Right) * eased);
                 Location = new Point(x, yPos);
-                Opacity = eased;
                 if (t >= 1.0)
                 {
                     anim.Stop();
                     Location = new Point(endX, yPos);
-                    Opacity = 1.0;
                     life.Start();
                 }
             }
@@ -723,7 +1103,6 @@ namespace QuotaTrayApp
                 int from = endX;
                 int to = Screen.PrimaryScreen.WorkingArea.Right;
                 Location = new Point((int)Math.Round(from + (to - from) * eased), yPos);
-                Opacity = 1.0 - eased;
                 if (t >= 1.0)
                 {
                     anim.Stop();
@@ -748,39 +1127,104 @@ namespace QuotaTrayApp
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.Clear(BackColor);
+            PaintContent(e.Graphics, null);
+        }
 
-            Color fg = dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(24, 24, 24);
-            Color sub = dark ? Color.FromArgb(176, 176, 176) : Color.FromArgb(104, 104, 104);
-            Color border = dark ? Color.FromArgb(64, 64, 68) : Color.FromArgb(224, 224, 227);
-
-            using (Pen pen = new Pen(border))
+        internal Bitmap RenderSurface(Bitmap backdrop)
+        {
+            Rectangle area = new Rectangle(0, 0, Width, Height);
+            using (var plate = new Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
             {
-                g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
-            }
-
-            try
-            {
-                using (Icon ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                using (Graphics graphics = Graphics.FromImage(plate))
                 {
-                    if (ico != null) g.DrawIcon(ico, new Rectangle(18, 14, 18, 18));
+                    graphics.Clear(BackColor);
+                    if (backdrop != null)
+                    {
+                        graphics.DrawImageUnscaled(backdrop, Point.Empty);
+                        Color tint = UiTheme.Dark ? Color.FromArgb(29, 33, 42) : Color.FromArgb(248, 250, 252);
+                        using (var brush = new SolidBrush(Color.FromArgb(BackdropTintAlpha, tint)))
+                            graphics.FillRectangle(brush, area);
+                    }
                 }
+                using (Graphics graphics = Graphics.FromImage(plate))
+                using (var outline = UiTheme.Round(new RectangleF(1, 1, Width - 2, Height - 2), CornerRadius - 1))
+                using (var reflection = new LinearGradientBrush(area, Color.FromArgb(164, Color.White),
+                    Color.FromArgb(84, Color.Black), LinearGradientMode.Vertical))
+                using (var edge = new Pen(reflection))
+                {
+                    graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    graphics.DrawPath(edge, outline);
+                    PaintContent(graphics, backdrop == null ? null : plate);
+                }
+
+                var surface = new Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                using (Graphics alpha = Graphics.FromImage(surface))
+                using (var shape = UiTheme.Round(area, CornerRadius))
+                using (var fill = new TextureBrush(plate, WrapMode.Clamp))
+                {
+                    alpha.SmoothingMode = SmoothingMode.AntiAlias;
+                    alpha.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    alpha.FillPath(fill, shape);
+                }
+                return surface;
             }
-            catch { }
+        }
 
-            TextRenderer.DrawText(g, L.T("额度显示器"), smallFont, new Point(44, 15), sub, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, titleText, titleFont, new Rectangle(18, 41, CardW - 60, 20),
-                fg, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, bodyText, bodyFont, new Rectangle(18, 65, CardW - 36, 22),
-                fg, TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+        private static Color InkAt(Bitmap plate, int x, int y, Color fallback)
+        {
+            if (plate == null) return fallback;
+            Color sample = plate.GetPixel(x, y);
+            double luminance = .2126 * LinearChannel(sample.R) + .7152 * LinearChannel(sample.G) + .0722 * LinearChannel(sample.B);
+            return luminance < .18 ? Color.White : Color.FromArgb(17, 22, 29);
+        }
 
-            // 右上角的关闭叉
-            using (Pen pen = new Pen(sub, 1.4f))
+        private static double LinearChannel(byte value)
+        {
+            double srgb = value / 255.0;
+            return srgb <= .04045 ? srgb / 12.92 : Math.Pow((srgb + .055) / 1.055, 2.4);
+        }
+
+        private void PaintContent(Graphics g, Bitmap plate)
+        {
+            Color detailColor = SystemInformation.HighContrast ? SystemColors.WindowText :
+                (UiTheme.Dark ? Color.FromArgb(236, 239, 244) : Color.FromArgb(55, 64, 77));
+            Color textColor = SystemInformation.HighContrast ? SystemColors.WindowText : UiTheme.TextColor;
+            UiTheme.Fill(g, new Rectangle(13, 13, 3, ClientSize.Height - 26), accountColor, null);
+
+            int titleWidth = Math.Min(ClientSize.Width - TextInset - 33,
+                TextRenderer.MeasureText(g, titleText, titleFont, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + 3);
+            DrawToastText(g, titleText, titleFont, new Rectangle(TextInset, 9, titleWidth, 21),
+                InkAt(plate, TextInset + titleWidth / 2, 19, textColor));
+            int emailLeft = TextInset + titleWidth + 8;
+            if (emailMask.Length > 0 && emailLeft < ClientSize.Width - 33)
+                DrawToastText(g, emailMask, smallFont, new Rectangle(emailLeft, 9, ClientSize.Width - emailLeft - 33, 21),
+                    InkAt(plate, emailLeft + (ClientSize.Width - emailLeft - 33) / 2, 19, detailColor));
+            DrawToastText(g, bodyText, bodyFont, new Rectangle(TextInset, 33, ClientSize.Width - TextInset - 16, 28),
+                InkAt(plate, 90, 46, textColor));
+            if (!String.IsNullOrEmpty(resetText))
+                DrawToastText(g, resetText, smallFont, new Rectangle(TextInset, 65, ClientSize.Width - TextInset - 16, 18),
+                    InkAt(plate, 75, 74, detailColor));
+
+            int cx = ClientSize.Width - 17, cy = 19;
+            using (Pen pen = new Pen(InkAt(plate, cx, cy, detailColor), 1.2f))
             {
-                int cx = CardW - 24, cy = 18;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.DrawLine(pen, cx - 4, cy - 4, cx + 4, cy + 4);
-                g.DrawLine(pen, cx + 4, cy - 4, cx - 4, cy + 4);
+                g.DrawLine(pen, cx - 4, cy + 4, cx + 4, cy - 4);
+            }
+        }
+
+        private static void DrawToastText(Graphics graphics, string text, Font font, Rectangle bounds, Color color)
+        {
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            using (var format = new StringFormat(StringFormat.GenericTypographic))
+            using (var brush = new SolidBrush(color))
+            {
+                format.LineAlignment = StringAlignment.Center;
+                format.Trimming = StringTrimming.EllipsisCharacter;
+                format.FormatFlags |= StringFormatFlags.NoWrap;
+                graphics.DrawString(text, font, brush, bounds, format);
             }
         }
 
@@ -829,7 +1273,8 @@ namespace QuotaTrayApp
                         string path = null;
                         try { path = p.MainModule.FileName; } catch { }
                         if (!string.IsNullOrEmpty(path)
-                            && path.EndsWith("codex.exe", StringComparison.OrdinalIgnoreCase)
+                            && String.Equals(Path.GetFileName(path), "codex.exe", StringComparison.OrdinalIgnoreCase)
+                            && !File.Exists(Path.Combine(Path.GetDirectoryName(path), "resources", "codex.exe"))
                             && File.Exists(path))
                         {
                             return path;
@@ -884,8 +1329,9 @@ namespace QuotaTrayApp
 
             string[] direct =
             {
-                Path.Combine(dir, "codex.exe"),
                 Path.Combine(dir, @"app\resources\codex.exe"),
+                Path.Combine(dir, @"resources\codex.exe"),
+                Path.Combine(dir, "codex.exe"),
             };
             foreach (string cand in direct)
             {
@@ -965,40 +1411,40 @@ namespace QuotaTrayApp
     }
 
     // 找不到 Codex 时弹的识别界面：自动搜寻 或 手动指定 codex.exe
-    internal class CodexLocateForm : Form
+    internal class CodexLocateForm : UiWindow
     {
         public string SelectedPath = "";
 
         private readonly TextBox pathBox;
         private readonly Label status;
-        private readonly bool dark;
         private readonly Color bg;
         private readonly Color fg;
         private readonly Color sub;
 
         public CodexLocateForm(string current)
         {
-            dark = TrayContext.IsDarkMode();
-            bg = dark ? Color.FromArgb(32, 32, 32) : SystemColors.Window;
-            fg = dark ? Color.FromArgb(235, 235, 235) : SystemColors.ControlText;
-            sub = dark ? Color.FromArgb(170, 170, 170) : Color.FromArgb(96, 96, 96);
+            bg = SystemColors.Control;
+            fg = SystemColors.ControlText;
+            sub = SystemColors.GrayText;
 
             Text = "Codex";
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            CanResize = false;
+            AutoScaleMode = AutoScaleMode.Dpi;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
             ShowIcon = false;
             Font = SystemFonts.MessageBoxFont;
-            ClientSize = new Size(460, 244);
+            ClientSize = new Size(480, 244 + CaptionHeight);
+            const int inset = 18, actionWidth = 126, actionHeight = 38, actionGap = 10;
+            int contentWidth = ClientSize.Width - 2 * inset;
             BackColor = bg;
             ForeColor = fg;
-            if (dark) HandleCreated += delegate { TrayContext.SetDarkTitleBar(Handle); };
 
             Label title = new Label();
-            title.Text = L.T("找不到 Codex");
+            title.Text = L.T(string.IsNullOrEmpty(current) || !File.Exists(current) ? "找不到 Codex" : "Codex 查询程序");
             title.Font = new Font(Font.FontFamily, 11f, FontStyle.Bold);
-            title.Location = new Point(18, 16);
+            title.Location = new Point(inset, 16);
             title.AutoSize = true;
             title.BackColor = bg;
             title.ForeColor = fg;
@@ -1006,70 +1452,66 @@ namespace QuotaTrayApp
 
             Label hint = new Label();
             hint.Text = L.T("选择 Codex 的安装文件夹或 Codex.exe 以连接程序。");
-            hint.Location = new Point(18, 46);
-            hint.Size = new Size(424, 22);
+            hint.Location = new Point(inset, 46);
+            hint.Size = new Size(contentWidth, 22);
             hint.BackColor = bg;
             hint.ForeColor = sub;
             Controls.Add(hint);
 
             pathBox = new TextBox();
-            pathBox.Location = new Point(18, 76);
-            pathBox.Size = new Size(424, 24);
+            pathBox.Location = new Point(inset, 76);
+            pathBox.Size = new Size(contentWidth, 24);
+            pathBox.BorderStyle = BorderStyle.None;
             pathBox.Text = current == null ? "" : current;
-            pathBox.BackColor = dark ? Color.FromArgb(48, 48, 52) : SystemColors.Window;
+            pathBox.BackColor = SystemColors.Window;
             pathBox.ForeColor = fg;
-            Controls.Add(pathBox);
+            UiCard pathFrame = new UiCard(); pathFrame.SetBounds(inset, 72, contentWidth, 34);
+            pathBox.Location = new Point(10, 7); pathBox.Width = contentWidth - 20; pathFrame.Controls.Add(pathBox); Controls.Add(pathFrame);
 
-            Button auto = new Button();
+            Button auto = new UiButton();
             auto.Text = L.T("自动搜寻");
-            auto.Location = new Point(18, 110);
-            auto.Size = new Size(126, 30);
+            auto.Location = new Point(inset, 110);
+            auto.Size = new Size(actionWidth, actionHeight);
             auto.Click += delegate { AutoFind(); };
             Controls.Add(auto);
 
-            Button choose = new Button();
+            Button choose = new UiButton();
             choose.Text = L.T("选择…");
-            choose.Location = new Point(154, 110);
-            choose.Size = new Size(126, 30);
+            choose.Location = new Point(inset + actionWidth + actionGap, 110);
+            choose.Size = new Size(actionWidth, actionHeight);
             choose.Click += delegate { Browse(); };
             Controls.Add(choose);
 
             status = new Label();
             status.Text = "";
-            status.Location = new Point(18, 148);
+            status.Location = new Point(inset, 148);
             status.AutoSize = true;
+            status.MaximumSize = new Size(contentWidth, 0);
             status.BackColor = bg;
             status.ForeColor = sub;
             Controls.Add(status);
 
-            Button ok = new Button();
+            Button ok = new UiButton();
             ok.Text = L.T("确定");
-            ok.Location = new Point(258, 196);
-            ok.Size = new Size(88, 32);
+            ok.Location = new Point(ClientSize.Width - inset - 2 * actionWidth - actionGap, 196);
+            ok.Size = new Size(actionWidth, actionHeight);
             ok.DialogResult = DialogResult.OK;
             ok.Click += delegate { ValidateAndClose(); };
             Controls.Add(ok);
 
-            Button cancel = new Button();
+            Button cancel = new UiButton();
             cancel.Text = L.T("取消");
-            cancel.Location = new Point(354, 196);
-            cancel.Size = new Size(88, 32);
+            cancel.Location = new Point(ClientSize.Width - inset - actionWidth, 196);
+            cancel.Size = new Size(actionWidth, actionHeight);
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(cancel);
 
             AcceptButton = ok;
             CancelButton = cancel;
 
-            if (dark)
-            {
-                foreach (Button b in new Button[] { auto, choose, ok, cancel })
-                {
-                    b.FlatStyle = FlatStyle.Flat;
-                    b.FlatAppearance.BorderColor = Color.FromArgb(84, 84, 88);
-                    b.BackColor = Color.FromArgb(48, 48, 52);
-                    b.ForeColor = fg;
-                }
-            }
+            foreach(Control child in Controls) if(child != TitleBar) child.Top += CaptionHeight;
+            ((UiButton)ok).Accent = true;
+            UiTheme.Hook(this);
         }
 
         private void AutoFind()
@@ -1149,8 +1591,6 @@ namespace QuotaTrayApp
     {        [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool DestroyIcon(IntPtr handle);
 
-        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-        private static extern void SHChangeNotify(int eventId, int flags, string item1, IntPtr item2);
 
         private const int PrimaryEverySec = 5;     // 5 小时额度：每 5 秒
         private const int SecondaryEverySec = 60;  // 7 天额度：每 1 分钟
@@ -1205,7 +1645,7 @@ namespace QuotaTrayApp
 
         private static string AutoStartValue()
         {
-            return "\"" + Application.ExecutablePath + "\"";
+            return "\"" + Application.ExecutablePath + "\" --background";
         }
 
         private static bool IsAutoStartEnabled()
@@ -1218,8 +1658,9 @@ namespace QuotaTrayApp
                     if (k == null) return false;
                     object v = k.GetValue(RunValueName);
                     if (v == null) return false;
-                    return string.Equals(Convert.ToString(v).Trim(), AutoStartValue(),
-                        StringComparison.OrdinalIgnoreCase);
+                    string current = Convert.ToString(v).Trim();
+                    return string.Equals(current, AutoStartValue(), StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(current, "\"" + Application.ExecutablePath + "\"", StringComparison.OrdinalIgnoreCase);
                 }
             }
             catch
@@ -1278,6 +1719,12 @@ namespace QuotaTrayApp
             public override Color CheckPressedBackground { get { return Color.FromArgb(64, 116, 186); } }
         }
 
+        internal static ContextMenuStrip CreateNativeContextMenu()
+        {
+            ContextMenuStrip menu = new UiTrayMenu { ShowImageMargin = false, ShowItemToolTips = true, Font = new Font("Microsoft YaHei UI", 9.5f) };
+            return menu;
+        }
+
         private static void ApplyMenuTheme(ContextMenuStrip menu)
         {
             if (IsDarkMode())
@@ -1320,7 +1767,7 @@ namespace QuotaTrayApp
         private readonly string root;
         private readonly string logPath;
         private readonly string quotaJs;
-        private readonly string nodeExe;
+        private string nodeExe;
 
         private readonly NotifyIcon tray;
         private readonly System.Windows.Forms.Timer uiTimer;
@@ -1355,7 +1802,24 @@ namespace QuotaTrayApp
 
         // 菜单项留引用：切语言时要就地改标题，不能重建整个菜单
         private ToolStripMenuItem menuRefresh, menuDetail, menuNotify;
-        private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang, menuLocate;
+        private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang, menuAccounts, menuDisplay, menuAccountHeader;
+        private AccountConnectionForm accountForm;
+        private QuotaSettingsForm quotaSettingsForm;
+        private MultiAccountController multiAccounts;
+        private volatile bool multiMode;
+        private bool accountDiscoveryPending;
+        private bool pendingDetails;
+        private bool contextDisposed;
+        private string multiDiscoveryError;
+        private readonly AccountToastQueue accountToasts = new AccountToastQueue();
+        private string viewAccountLabel = "";
+        private string viewAccountSlot;
+        private readonly EventWaitHandle accountsRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTrayAccountsRequest");
+        private readonly EventWaitHandle settingsRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTraySettingsRequest");
+        private readonly EventWaitHandle displayRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTrayDisplayRequest");
+        private readonly EventWaitHandle detailsRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTrayDetailsRequest");
+        private readonly EventWaitHandle exitRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTrayExitRequest");
+        private readonly EventWaitHandle groupTestRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexQuotaTrayGroupTestRequest");
         private ToolStripMenuItem[] menuLevels = new ToolStripMenuItem[4];
         private ToolStripMenuItem[] menuLangItems = new ToolStripMenuItem[4];
         private static readonly int[] LevelValues = new int[] { -1, 0, 1, 2 };
@@ -1383,35 +1847,35 @@ namespace QuotaTrayApp
             try { Directory.CreateDirectory(root); } catch { }
             logPath = Path.Combine(root, "tray.log");
             settings = AppSettings.Load(root);
+            UiTheme.Set(settings.theme);
+            if (IsAutoStartEnabled()) SetAutoStart(true);
             ApplyLanguageSetting();
             PrepareCodexPath();
             quotaJs = Path.Combine(root, "quota.js");
             EnsureQuotaJs();       // 单文件 exe：js 内嵌在程序里，缺了就解出来
-            nodeExe = FindNode();
+            if (settings.HasCodex || AccountConnectionForm.HasBindingStore()) nodeExe = FindNode();
 
             tray = new NotifyIcon();
             tray.Visible = true;
             tray.Icon = DrawIcon(0, 0, false);
             currentIcon = tray.Icon;
-            tray.Text = ClampTray(L.T("额度显示器｜正在读取额度…"));
+            tray.Text = ClampTray(L.T("未绑定任何账号"));
 
-            var menu = new ContextMenuStrip();
-            menu.ShowImageMargin = false;
+            var menu = CreateNativeContextMenu();
             menuFontBold = new Font(SystemFonts.MenuFont, FontStyle.Bold);
 
             menuRefresh = new ToolStripMenuItem();
-            menuRefresh.Click += delegate { refreshNow.Set(); };
+            menuRefresh.Click += delegate { if (multiMode) multiAccounts.RefreshSelected(); else if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
 
             menuDetail = new ToolStripMenuItem();
-            menuDetail.Click += delegate { ShowDetail(); };
+            menuDetail.Click += delegate { if (multiMode) multiAccounts.ShowAllDetails(); else ShowDetail(); };
 
             // 额度提醒：档位直接决定 5 小时额度（Pro 则是 7 天额度）在哪些节点响。
             menuNotify = new ToolStripMenuItem();
             for (int i = 0; i < LevelValues.Length; i++)
             {
-                int v = LevelValues[i];
                 ToolStripMenuItem mi = new ToolStripMenuItem();
-                mi.Click += delegate { SetNotifyLevel(v); };
+                mi.Click += delegate { ShowSettingsPage("notifications"); };
                 menuLevels[i] = mi;
                 menuNotify.DropDownItems.Add(mi);
             }
@@ -1432,27 +1896,26 @@ namespace QuotaTrayApp
                 Log("开机自启动 -> " + (target ? "开" : "关"));
             };
 
-            menuLocate = new ToolStripMenuItem();
-            menuLocate.Click += delegate
-            {
-                locateShown = true;
-                ShowLocateDialog();
-            };
+            menuAccountHeader = new ToolStripMenuItem();
+            menuAccountHeader.Enabled = false;
+            menuAccountHeader.Visible = false;
+            menuDisplay = new ToolStripMenuItem();
+            menuDisplay.Click += delegate { ShowSettingsPage("general"); };
+            menuAccounts = new ToolStripMenuItem();
+            menuAccounts.Click += delegate { ShowSettingsPage("accounts"); };
+
 
             menuShortcut = new ToolStripMenuItem();
             menuShortcut.Click += delegate
             {
+                if (multiMode) { multiAccounts.CreateDesktopShortcut(); return; }
                 if (EnsureDesktopShortcut(true))
                     ShowBalloon(L.T("已创建"), L.T("桌面快捷方式已就位，图标会跟着额度变化。"));
             };
 
             menuExit = new ToolStripMenuItem();
-            menuExit.Click += delegate
-            {
-                tray.Visible = false;
-                tray.Dispose();
-                ExitThread();
-            };
+            menuExit.Name = "tray-exit";
+            menuExit.Click += delegate { Shutdown(); };
 
             // 语言：自动 = 跟随系统，其余两种手动锁死
             menuLang = new ToolStripMenuItem();
@@ -1465,25 +1928,18 @@ namespace QuotaTrayApp
                 menuLang.DropDownItems.Add(mi);
             }
 
-            // 顺序：先查看，再设置，然后杂项，退出单独一条放最底
             menu.Items.Add(menuRefresh);
-            menu.Items.Add(menuDetail);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(menuNotify);
-            menu.Items.Add(menuAutoStart);
-            menu.Items.Add(menuLang);
-            menu.Items.Add(menuLocate);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(menuShortcut);
-            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(menuDisplay);
             menu.Items.Add(menuExit);
 
             ApplyLanguage();
             UpdateAutoStartItem(menuAutoStart);
 
             menu.Opening += delegate {
-                ApplyMenuTheme(menu);
+                ((UiTrayMenu)menu).StatusText = multiMode ? null : L.T(AccountStatusKey());
                 UpdateAutoStartItem(menuAutoStart);
+                // 子菜单是另一个 ToolStrip，得单独开，否则档位那几条不出悬停提示
+                menuNotify.DropDown.ShowItemToolTips = true;
                 for (int i = 0; i < menuLevels.Length; i++)
                 {
                     bool on = (LevelValues[i] == settings.notifyLevel);
@@ -1499,6 +1955,7 @@ namespace QuotaTrayApp
                 }
             };
             tray.ContextMenuStrip = menu;
+            ((UiTrayMenu)menu).Track(tray);
 
             // 调试用：--preview-menu <png> 把右键菜单展开并截图，检查深色下的对比度
             string[] menuArgv = Environment.GetCommandLineArgs();
@@ -1511,7 +1968,6 @@ namespace QuotaTrayApp
                 {
                     t1.Stop();
                     menu.Show(new Point(220, 220));
-                    menuNotify.ShowDropDown();
                     System.Windows.Forms.Timer t2 = new System.Windows.Forms.Timer();
                     t2.Interval = 600;
                     t2.Tick += delegate
@@ -1541,7 +1997,7 @@ namespace QuotaTrayApp
             }
 
             // 双击图标 = 刷新
-            tray.DoubleClick += delegate { refreshNow.Set(); };
+            tray.DoubleClick += delegate { if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
 
             Log("启动（pid=" + Process.GetCurrentProcess().Id + "，node=" + nodeExe + "）");
 
@@ -1556,7 +2012,7 @@ namespace QuotaTrayApp
                 secondaryReset = ToUnix(DateTime.UtcNow.AddDays(3));
                 secondaryDays = 7;
                 hasData = true;
-                ShowDetail();
+                ShowDetailPreview();
                 ExitThread();
                 return;
             }
@@ -1579,42 +2035,333 @@ namespace QuotaTrayApp
             // 开机/重启时先看上次的桌面图标还能不能直接用：
             // 数值没变就不重画、不改快捷方式、不通知 Shell，桌面一个像素都不动。
             LoadDesktopIconState();
+            if (!noDesktopTouch) RestartMultiAccounts();
 
             uiTimer = new System.Windows.Forms.Timer();
             uiTimer.Interval = 1000;
-            uiTimer.Tick += delegate { PumpResults(); };
+            uiTimer.Tick += delegate
+            {
+                if (exitRequest.WaitOne(0)) { Shutdown(); return; }
+                if (multiAccounts != null) multiAccounts.Pump();
+                if (accountsRequest.WaitOne(0)) ShowAccountConnections();
+                if (settingsRequest.WaitOne(0)) ShowSettingsPage("accounts");
+                if (displayRequest.WaitOne(0)) ShowDisplaySettings();
+                if (groupTestRequest.WaitOne(0) && multiAccounts != null) multiAccounts.RunGroupUiTest();
+                if (detailsRequest.WaitOne(0)) pendingDetails = true;
+                if (pendingDetails && !accountDiscoveryPending)
+                {
+                    pendingDetails = false;
+                    if (multiMode) multiAccounts.ShowAllDetails(); else ShowDetail();
+                }
+                PumpResults();
+                PumpAccountToasts();
+            };
             uiTimer.Start();
 
             worker = new Thread(WorkerLoop);
             worker.IsBackground = true;
             worker.Start();
+            if (argv.Length > 1 && argv[1] == "--connect-accounts") accountsRequest.Set();
+            if (argv.Length == 1 || (argv.Length > 1 && argv[1] == "--settings")) settingsRequest.Set();
+            if (argv.Length > 1 && argv[1] == "--display-settings") displayRequest.Set();
+            if (argv.Length > 1 && argv[1] == "--quota-details") detailsRequest.Set();
+            if (argv.Length > 1 && argv[1] == "--test-group-ui") groupTestRequest.Set();
+        }
+
+        private void ShowDisplaySettings() { ShowSettingsPage("display"); }
+        internal void RefreshSettingsAccounts()
+        {
+            if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.RefreshAccounts();
+        }
+        internal void ShowSettingsPage(string page)
+        {
+            if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed)
+            {
+                quotaSettingsForm.Navigate(page); UiTheme.Present(quotaSettingsForm); return;
+            }
+            var actions = new SettingsActions();
+            actions.Read = delegate {
+                return new SettingsSnapshot { Accounts = multiAccounts == null ? new System.Collections.Generic.List<SettingsAccount>() : multiAccounts.SettingsAccounts(),
+                    AccountsLoading = accountDiscoveryPending, DesktopSlot = multiAccounts == null ? "auto" : multiAccounts.DesktopPreference,
+                    CodexMissing = !settings.HasCodex, AccountReadError = multiDiscoveryError,
+                    Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel, AutoStart = IsAutoStartEnabled() };
+            };
+            actions.ConnectAccounts = delegate { ShowAccountConnections(); };
+            actions.RefreshAll = delegate { if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
+            actions.LocateCodex = delegate { ShowLocateDialog(); };
+            actions.CreateShortcut = delegate { if (multiMode && multiAccounts != null) multiAccounts.CreateDesktopShortcut(); else EnsureDesktopShortcut(true); };
+            actions.Exit = delegate { Shutdown(); };
+            actions.SaveDisplay = delegate(string[] slots, string desktop) { return multiAccounts != null && multiAccounts.SaveDisplay(slots, desktop); };
+            actions.SetAccountLevel = delegate(string slot, int level) {
+                settings.SetAccountLevel(slot, level); settings.Save(root); accountToasts.Remove(slot);
+                if (multiAccounts != null) multiAccounts.ResetReminder(slot);
+            };
+            actions.ApplyGlobalLevel = ApplyGlobalNotifyLevel;
+            actions.SetLanguage = delegate(string language) { SetLanguage(language); if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Reload(); };
+            actions.SetTheme = delegate(string theme) { settings.theme = UiTheme.Normalize(theme); settings.Save(root); UiTheme.Set(settings.theme); };
+            actions.SetAutoStart = delegate(bool enabled) { return SetAutoStart(enabled); };
+            quotaSettingsForm = new QuotaSettingsForm(actions, page);
+            quotaSettingsForm.FormClosed += delegate { quotaSettingsForm = null; };
+            UiTheme.Present(quotaSettingsForm);
+        }
+
+        private void ShowAccountConnections()
+        {
+            if (accountForm != null && !accountForm.IsDisposed)
+            {
+                UiTheme.Present(accountForm);
+                return;
+            }
+            try
+            {
+                if (nodeExe == null) nodeExe = FindNode();
+                accountForm = new AccountConnectionForm(nodeExe, settings.codexPath, root, multiAccounts == null ? null : multiAccounts.SettingsAccounts());
+                if (quotaSettingsForm != null && quotaSettingsForm.Visible) accountForm.Owner = quotaSettingsForm;
+                accountForm.InitialSetup = !settings.bindingSetupDone;
+                accountForm.BindingChanged += delegate { if (multiAccounts != null) multiAccounts.ReloadBindings(); else RestartMultiAccounts(); };
+                accountForm.LocateRequested += delegate { locateShown = true; ShowLocateDialog(true); };
+                accountForm.FormClosed += delegate
+                {
+                    accountForm = null;
+                };
+                UiTheme.Present(accountForm);
+            }
+            catch
+            {
+                ShowBalloon(L.T("账号连接"), L.T("无法打开账号连接，请重试。"));
+            }
+        }
+
+        private void RestartMultiAccounts()
+        {
+            multiDiscoveryError = null;
+            if (multiAccounts != null)
+            {
+                SetMultiMode(false);
+                try { multiAccounts.Dispose(); } catch { }
+                multiAccounts = null;
+            }
+            if (!AccountConnectionForm.HasBindingStore())
+            {
+                MultiDiscoveryComplete();
+                return;
+            }
+            accountDiscoveryPending = true;
+            if (nodeExe == null) nodeExe = FindNode();
+            try
+            {
+                multiAccounts = new MultiAccountController(this, root, nodeExe, settings.codexPath, settings, tray.ContextMenuStrip);
+            }
+            catch
+            {
+                ReportMultiDiscoveryFailure();
+            }
+        }
+
+        private string AccountStatusKey()
+        {
+            if (accountDiscoveryPending) return "正在读取本地绑定…";
+            return multiDiscoveryError ?? "未绑定任何账号";
+        }
+
+        private void PublishAccountStatus()
+        {
+            if (!multiMode) tray.Text = ClampTray(L.T(AccountStatusKey()) +
+                (settings.HasCodex ? "" : "\n" + L.T("未识别到 Codex")));
+            RefreshSettingsAccounts();
+        }
+
+        internal void MultiDiscoveryComplete()
+        {
+            accountDiscoveryPending = false;
+            multiDiscoveryError = null;
+            if (multiMode && !settings.bindingSetupDone) { settings.bindingSetupDone = true; settings.Save(root); }
+            PublishAccountStatus();
+        }
+
+        internal void ReportMultiDiscoveryFailure()
+        {
+            accountDiscoveryPending = false;
+            multiDiscoveryError = "无法读取本地绑定，请手动刷新。";
+            PublishAccountStatus();
+        }
+
+        private void PumpAccountToasts()
+        {
+            AccountToastEntry next = accountToasts.Take(toast != null && !toast.IsDisposed);
+            if (next == null) return;
+            ShowToast(next.Slot == null ? next.Label + " · " + L.T("额度提醒") : L.T("额度提醒"), next.Body, next.Sound, next.Slot, next.EmailMask);
+        }
+
+        internal void SetMultiMode(bool enabled)
+        {
+            multiMode = enabled;
+            if (enabled) MultiDiscoveryComplete();
+            tray.Visible = !enabled;
+            menuAccountHeader.Visible = enabled;
+            if (!enabled)
+            {
+                accountToasts.Clear();
+                viewAccountLabel = "";
+                viewAccountSlot = null;
+                notifyTiered = null;
+                notifyFixed = null;
+                refreshNow.Set();
+            }
+        }
+
+        internal void PrepareMultiMenu(string slot, string label)
+        {
+            menuAccountHeader.Text = label;
+            menuAccountHeader.Visible = true;
+        }
+
+        private static bool ValidMultiWindow(WindowInfo value)
+        {
+            return value != null && !double.IsNaN(value.used) && !double.IsInfinity(value.used) && value.used >= 0 && value.used <= 100 &&
+                !double.IsNaN(value.windowMins) && !double.IsInfinity(value.windowMins) && value.windowMins > 0 &&
+                !double.IsNaN(value.resetsAt) && !double.IsInfinity(value.resetsAt) && value.resetsAt >= 0 && value.resetsAt <= 253402300799;
+        }
+
+        private static void MultiWindows(ConnectionReply reply, out WindowInfo shortWindow, out WindowInfo longWindow)
+        {
+            shortWindow = null;
+            longWindow = null;
+            if (reply == null || !reply.ok) return;
+            foreach (WindowInfo value in new WindowInfo[] { reply.primary, reply.secondary })
+            {
+                if (!ValidMultiWindow(value)) continue;
+                if (value.windowMins > 1440)
+                {
+                    if (longWindow == null || value.windowMins > longWindow.windowMins) longWindow = value;
+                }
+                else if (shortWindow == null || value.windowMins < shortWindow.windowMins) shortWindow = value;
+            }
+        }
+
+        internal static ConnectionReply NormalizeMultiReply(ConnectionReply reply)
+        {
+            WindowInfo shortWindow, longWindow;
+            MultiWindows(reply, out shortWindow, out longWindow);
+            return new ConnectionReply
+            {
+                @event = "result", ok = shortWindow != null || longWindow != null,
+                slot = reply == null ? null : reply.slot,
+                identity = reply == null ? null : reply.identity,
+                at = reply == null ? 0 : reply.at,
+                primary = shortWindow, secondary = longWindow,
+                code = shortWindow == null && longWindow == null ? "no_quota_data" : null
+            };
+        }
+
+        internal static Icon MakeMultiIcon(ConnectionReply reply)
+        {
+            WindowInfo shortWindow, longWindow;
+            MultiWindows(reply, out shortWindow, out longWindow);
+            if (shortWindow == null && longWindow == null) return DrawIcon(0, 0, false);
+            if (shortWindow == null) return DrawSingleIcon(longWindow.used, true);
+            if (longWindow == null) return DrawSingleIcon(shortWindow.used, true);
+            return DrawIcon(shortWindow.used, longWindow.used, true);
+        }
+
+        internal static Bitmap RenderMultiTrayGauge(ConnectionReply reply, int size)
+        {
+            WindowInfo shortWindow, longWindow;
+            MultiWindows(reply, out shortWindow, out longWindow);
+            if (shortWindow == null && longWindow == null) return RenderTrayGauge(size, 0, 0, false);
+            if (shortWindow == null) return RenderSingleGauge(size, longWindow.used, true, true);
+            if (longWindow == null) return RenderSingleGauge(size, shortWindow.used, true, true);
+            return RenderTrayGauge(size, shortWindow.used, longWindow.used, true);
+        }
+
+        internal static string MultiCountdown(double reset)
+        {
+            if (double.IsNaN(reset) || double.IsInfinity(reset) || reset <= 0 || reset > 253402300799) return "?";
+            string text = CountdownTray(reset);
+            return L.Lang == "zh" ? text.Replace("后恢复", "后").Replace(" ", "") : text;
+        }
+
+        internal static string MultiTooltipCountdown(double reset)
+        {
+            if (double.IsNaN(reset) || double.IsInfinity(reset) || reset <= 0 || reset > 253402300799) return L.Lang == "zh" ? L.T("恢复时间未知") : CountdownTray(0);
+            return L.Lang == "zh" ? Countdown(reset) : CountdownTray(reset);
+        }
+
+        private void LoadMultiView(ConnectionReply reply, string label, string error, DateTime success)
+        {
+            WindowInfo shortWindow, longWindow;
+            MultiWindows(reply, out shortWindow, out longWindow);
+            hasData = shortWindow != null || longWindow != null;
+            primaryUsed = shortWindow == null ? -1 : shortWindow.used;
+            primaryReset = shortWindow == null ? 0 : shortWindow.resetsAt;
+            secondaryUsed = longWindow == null ? -1 : longWindow.used;
+            secondaryReset = longWindow == null ? 0 : longWindow.resetsAt;
+            secondaryDays = longWindow == null ? 7 : Math.Max(1, (int)Math.Round(longWindow.windowMins / 1440));
+            plan = reply == null || reply.identity == null ? "" : reply.identity.plan;
+            viewAccountLabel = label ?? "";
+            viewAccountSlot = reply == null ? null : reply.slot;
+            lastError = error ?? "";
+            lastOkAt = success;
+        }
+
+        internal void ShowMultiDetail(ConnectionReply reply, string label, string error, DateTime lastSuccess)
+        {
+            LoadMultiView(reply, label, error, lastSuccess);
+            ShowDetail();
+        }
+
+        internal void SyncMultiDesktop(ConnectionReply reply)
+        {
+            if (reply == null || !reply.ok) return;
+            LoadMultiView(reply, "", null, DateTime.Now);
+            if (!hasData) return;
+            UpdateDesktopIcon(Math.Max(0, primaryUsed), Math.Max(0, secondaryUsed));
+        }
+
+        internal void ShowMultiToast(string slot, string label, string body, string soundFile, string emailMask)
+        {
+            accountToasts.Enqueue(slot, label, body, soundFile, emailMask);
+        }
+
+        internal void EnsureMultiShortcut(ConnectionReply reply, string label)
+        {
+            LoadMultiView(reply, label, null, DateTime.Now);
+            if (EnsureDesktopShortcut(true))
+            {
+                desktopIconKey = "";
+                if (hasData) UpdateDesktopIcon(Math.Max(0, primaryUsed), Math.Max(0, secondaryUsed));
+                ShowBalloon(L.T("已创建"), L.T("桌面快捷方式已就位，图标会跟着额度变化。"));
+            }
         }
 
         // ---------- 找 Codex ----------
         // 已经认过的路径还在就直接用；配置里没有就先自动找一个，找不到再等界面提示
         private void PrepareCodexPath()
         {
-            if (!string.IsNullOrEmpty(settings.codexPath) && File.Exists(settings.codexPath)) return;
-
-            string found = CodexFinder.Find();
-            if (!string.IsNullOrEmpty(found))
-            {
-                settings.codexPath = found;
-                settings.Save(root);
-                Log("自动识别到 Codex：" + found);
-                return;
-            }
-            needLocate = true;
+            string found = settings.DetectCodexOnce(root, CodexFinder.Find);
+            if (!string.IsNullOrEmpty(found)) Log("自动识别到 Codex：" + found);
         }
 
-        private void ShowLocateDialog()
+        private void ShowLocateDialog() { ShowLocateDialog(false); }
+
+        private void ShowLocateDialog(bool fromConnections)
         {
+            if (!fromConnections && accountForm != null && !accountForm.IsDisposed)
+            {
+                UiTheme.Present(accountForm);
+                ShowBalloon(L.T("账号连接"), L.T("请先关闭账号连接窗口。"));
+                return;
+            }
             using (CodexLocateForm f = new CodexLocateForm(settings.codexPath))
             {
-                if (f.ShowDialog() != DialogResult.OK) return;
+                if (f.ShowDialog(fromConnections ? accountForm : null) != DialogResult.OK) return;
                 settings.codexPath = f.SelectedPath;
+                settings.codexLookupAttempted = true;
                 settings.Save(root);
+                if (nodeExe == null || !File.Exists(nodeExe)) nodeExe = FindNode();
+                if (fromConnections && accountForm != null) accountForm.SetCodexPath(settings.codexPath, nodeExe);
                 Log("手动识别 Codex：" + settings.codexPath);
+                RestartMultiAccounts();
                 refreshNow.Set();
             }
         }
@@ -1645,33 +2392,42 @@ namespace QuotaTrayApp
             menuLevels[1].Text = L.T("低档");
             menuLevels[2].Text = L.T("中档");
             menuLevels[3].Text = L.T("高档");
+            // 悬停在某一档上才说明它什么时候弹，菜单本身保持干净
+            menuLevels[0].ToolTipText = L.T("不弹任何提醒");
+            menuLevels[1].ToolTipText = L.T("剩 25% 和 10% 时各提醒一次") + "\r\n" + L.T("7 天额度固定剩 25%、10%");
+            menuLevels[2].ToolTipText = L.T("剩 75%、25%、10% 时各提醒一次") + "\r\n" + L.T("7 天额度固定剩 25%、10%");
+            menuLevels[3].ToolTipText = L.T("剩 75%、50%、25%、10% 时各提醒一次") + "\r\n" + L.T("7 天额度固定剩 25%、10%");
             menuAutoStart.Text = L.T("开机自启动");
             menuShortcut.Text = L.T("创建桌面快捷方式");
             menuExit.Text = L.T("退出");
             menuLang.Text = L.T("语言");
-            menuLocate.Text = L.T("识别 Codex…");
+            menuAccounts.Text = L.T("账号");
+            menuDisplay.Text = L.T("设置");
             menuLangItems[0].Text = L.T("自动");
             menuLangItems[1].Text = "中文";
             menuLangItems[2].Text = "日本語";
             menuLangItems[3].Text = "English";
             UpdateAutoStartItem(menuAutoStart);
-            UpdateUi();
+            if (multiMode && multiAccounts != null) multiAccounts.ApplyLanguage();
+            else UpdateUi();
         }
 
         // ---------- 额度提醒 ----------
-        private void SetNotifyLevel(int v)
+        private bool ApplyGlobalNotifyLevel(int level)
         {
-            settings.notifyLevel = v;
-            settings.Save(root);
-            notifyTiered = null;   // 重建：清空已上膛记录，下一次采样重新静默打基线
+            if (!settings.ApplyGlobalLevel(root, level)) return false;
+            accountToasts.Clear();
+            if (multiAccounts != null)
+                foreach (string slot in new[] { "a", "b", "c", "d", "e" }) multiAccounts.ResetReminder(slot);
+            notifyTiered = null;
             notifyFixed = null;
-            ShowBalloon(L.T("额度提醒"), v < 0 ? L.T("已关闭，不再弹通知。") : L.F("已设为{0}。", settings.Display()));
-            Log("额度提醒档位 -> " + settings.Key());
+            Log("全局额度提醒档位 -> " + settings.Key());
+            return true;
         }
 
         private void EnsureNotifiers(bool singleWindow)
         {
-            int[] tier = NotifyRules.Tier(settings.notifyLevel);
+            int[] tier = singleWindow ? NotifyRules.LongTier(settings.notifyLevel) : NotifyRules.Tier(settings.notifyLevel);
             string tag = singleWindow ? "long" : "short";
             if (notifyTiered == null || notifyTiered.name != tag || !SameThresholds(notifyTiered.thresholds, tier))
             {
@@ -1679,11 +2435,12 @@ namespace QuotaTrayApp
                 notifyTiered.name = tag;
                 notifyTiered.thresholds = tier;
             }
-            if (notifyFixed == null)
+            int[] longTier = NotifyRules.LongTier(settings.notifyLevel);
+            if (notifyFixed == null || !SameThresholds(notifyFixed.thresholds, longTier))
             {
                 notifyFixed = new NotifyWindow();
-                notifyFixed.name = "longFixed";
-                notifyFixed.thresholds = NotifyRules.LongFixed();
+                notifyFixed.name = "long";
+                notifyFixed.thresholds = longTier;
             }
         }
 
@@ -1750,7 +2507,7 @@ namespace QuotaTrayApp
         }
 
         // 自绘弹窗，同时播放 exe 同目录里的提示音
-        private void ShowToast(string title, string body, string soundFile)
+        private void ShowToast(string title, string body, string soundFile, string slot = null, string emailMask = null)
         {
             try
             {
@@ -1759,7 +2516,7 @@ namespace QuotaTrayApp
                     try { toast.Close(); toast.Dispose(); } catch { }
                     toast = null;
                 }
-                toast = new ToastForm(title, body);
+                toast = new ToastForm(title, body, slot, emailMask);
                 toast.Show();
             }
             catch (Exception ex)
@@ -1773,23 +2530,35 @@ namespace QuotaTrayApp
         {
             try
             {
-                string wav = Path.Combine(root, soundFile);
-                if (!File.Exists(wav)) wav = Path.Combine(root, "notify.wav");   // 缺文件退回默认音
-                if (!File.Exists(wav)) return;
-                System.Media.SoundPlayer sp;
-                if (players == null) players = new System.Collections.Generic.Dictionary<string, System.Media.SoundPlayer>();
-                if (!players.TryGetValue(wav, out sp))
-                {
-                    sp = new System.Media.SoundPlayer(wav);
-                    sp.Load();   // 预载，避免第一次播放卡一下
-                    players[wav] = sp;
-                }
-                sp.Play();
+                System.Media.SoundPlayer sp=LoadNotifySound(root,soundFile);
+                if(sp!=null)sp.Play();
             }
             catch (Exception ex)
             {
                 Log("提示音失败：" + ex.Message);
             }
+        }
+
+        internal static readonly string[] NotifySoundFiles = new string[] { "notify.wav", "notify-5h-empty.wav", "notify-7d-empty.wav" };
+        internal static System.Media.SoundPlayer LoadNotifySound(string dir,string soundFile)
+        {
+            string requested=String.IsNullOrEmpty(soundFile)?"notify.wav":soundFile;
+            string path=Path.Combine(dir,requested);
+            string key=path;
+            Stream stream=null;
+            bool fromFile = File.Exists(path);
+            if (!fromFile) key = "resource:" + requested;
+            if (players == null) players = new System.Collections.Generic.Dictionary<string,System.Media.SoundPlayer>();
+            System.Media.SoundPlayer player;
+            if (players.TryGetValue(key, out player)) return player;
+            if (!fromFile)
+            {
+                stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(requested);
+                if (stream == null)
+                    return requested == "notify.wav" ? null : LoadNotifySound(dir, "notify.wav");
+            }
+            player=stream==null?new System.Media.SoundPlayer(path):new System.Media.SoundPlayer(stream);
+            player.Load(); players[key]=player; return player;
         }
 
         // ---------- 绿色版：数据目录 / 内嵌 js / 找 node ----------
@@ -1884,22 +2653,9 @@ namespace QuotaTrayApp
         // ---------- 后台线程：定期查询 ----------
         private void WorkerLoop()
         {
-            while (!stopWorker.WaitOne(0))
-            {
-                DateTime started = DateTime.UtcNow;
-                QuotaResult r = Query();
-                lock (gate)
-                {
-                    pending = r;
-                    hasPending = true;
-                }
-                // 按固定节拍走：查询本身要花两三秒，这段要算进去，否则实际间隔会变成「5 秒 + 查询耗时」
-                int waitMs = PrimaryEverySec * 1000 - (int)(DateTime.UtcNow - started).TotalMilliseconds;
-                if (waitMs < 300) waitMs = 300;
-                int idx = WaitHandle.WaitAny(new WaitHandle[] { refreshNow, stopWorker }, waitMs);
-                if (idx == 0) refreshNow.Reset();
-                if (idx == 1) return;
-            }
+            // 所有真实读取统一经过已确认绑定的账号控制器。
+            // 未绑定或用户取消时，不能退回隐式读取Codex当前登录。
+            stopWorker.WaitOne();
         }
 
         private QuotaResult Query()
@@ -1961,11 +2717,10 @@ namespace QuotaTrayApp
         // ---------- UI 线程：取结果并刷新显示 ----------
         private void PumpResults()
         {
-            if (needLocate && !locateShown)
+            if (multiMode)
             {
-                locateShown = true;
-                needLocate = false;
-                ShowLocateDialog();
+                lock (gate) { pending = null; hasPending = false; }
+                return;
             }
             QuotaResult r = null;
             lock (gate)
@@ -2067,15 +2822,16 @@ namespace QuotaTrayApp
         //   ② 只有百分比真的变了才写，避免白折腾和桌面闪。
         private void UpdateDesktopIcon(double pUsed, double sUsed)
         {
-            if (noDesktopTouch) return;
+            if (noDesktopTouch || accountDiscoveryPending) return;
             try
             {
+                bool shortOnly = multiMode && primaryUsed >= 0 && secondaryUsed < 0;
+                if (shortOnly) sUsed = pUsed;
                 int p = (int)Math.Round(pUsed);
                 int s = (int)Math.Round(sUsed);
-                bool single = primaryUsed < 0 && secondaryUsed >= 0;   // Pro：只有一个额度，画单环
+                bool single = shortOnly || (primaryUsed < 0 && secondaryUsed >= 0);   // 一个有效窗口使用原单环
                 string key = (single ? "S" : "D") + p + "/" + s;
                 if (key == desktopIconKey) return;
-                desktopIconKey = key;
 
                 // 关闭开关：程序目录里放一个 disable-desktop-icon.txt 就不动桌面图标
                 if (File.Exists(Path.Combine(root, "disable-desktop-icon.txt"))) return;
@@ -2109,11 +2865,8 @@ namespace QuotaTrayApp
                     Marshal.ReleaseComObject(sh);
                 }
 
-                // SHCNE_UPDATEITEM = 0x2000，SHCNF_PATHW = 0x0005
-                // 注意：只用「单项更新」，不要用 SHCNE_ASSOCCHANGED(0x08000000)——
-                // 那个会让 Explorer 刷新整个桌面，所有图标一起闪。
-                SHChangeNotify(0x2000, 0x0005, lnkPath, IntPtr.Zero);
-
+                // The link write is visible to Explorer's file watcher. Avoid a second Shell notification.
+                desktopIconKey = key;
                 Log("桌面图标已同步：" + key + "（" + Path.GetFileName(icoPath) + "）");
                 SaveDesktopIconState(key, icoPath);
                 CleanupOldDesktopIcons();
@@ -2239,6 +2992,7 @@ namespace QuotaTrayApp
 
         private void ShowBalloon(string title, string text)
         {
+            if (multiMode && multiAccounts != null) { multiAccounts.ShowBalloon(title, text); return; }
             try
             {
                 tray.ShowBalloonTip(5000, title, text, ToolTipIcon.Info);
@@ -2321,6 +3075,9 @@ namespace QuotaTrayApp
                     + "\n" + L.T("（右键可退出）"));
                 SetIcon(DrawIcon(0, 0, false));
             }
+
+            if (!multiMode && !hasData)
+                tray.Text = ClampTray(L.T(AccountStatusKey()) + (settings.HasCodex ? "" : "\n" + L.T("未识别到 Codex")));
 
             // 状态快照（方便排查）
             try
@@ -2591,39 +3348,42 @@ namespace QuotaTrayApp
         }
 
         // 桌面测试脚本用：按类型弹一次，配上对应的提示音
-        internal static void RunToastDemo(string kind)
+        internal static void RunToastDemo(string kind, string slot)
         {
-            string body;
-            string sound;
+            string dir = Path.GetDirectoryName(Application.ExecutablePath);
+            AppSettings prefs = AppSettings.Load(dir);
             L.AutoDetect();
-            if (kind == "5h-empty") { body = L.T("5 小时额度已耗尽"); sound = "notify-5h-empty.wav"; }
-            else if (kind == "7d-empty") { body = L.T("7 天额度已耗尽"); sound = "notify-7d-empty.wav"; }
-            else if (kind == "10") { body = L.T("5 小时额度只剩 10%｜30 分后恢复"); sound = "notify.wav"; }
-            else { body = L.T("5 小时额度还剩 75%｜2 小时后恢复"); sound = "notify.wav"; }
-
+            if (prefs.language != "auto") L.Lang = prefs.language;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            UiTheme.Set(prefs.theme);
 
-            string dir = Path.GetDirectoryName(Application.ExecutablePath);
-            string wav = Path.Combine(dir, sound);
-            if (!File.Exists(wav)) wav = Path.Combine(dir, "notify.wav");
-            try
+            string body, sound;
+            bool exhausted = kind == "5h-empty" || kind == "7d-empty";
+            bool weekly = kind == "7d-empty" || kind == "7d-25";
+            string window = weekly ? L.F("{0} 天", 7) : L.T("5 小时");
+            if (exhausted)
             {
-                if (File.Exists(wav))
-                {
-                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wav);
-                    sp.Play();
-                }
+                body = L.F("{0}额度已耗尽", window);
+                sound = weekly ? "notify-7d-empty.wav" : "notify-5h-empty.wav";
             }
-            catch { }
-
-            ToastForm f = new ToastForm(L.T("额度提醒"), body);
-            f.Show();
-            DateTime until = DateTime.Now.AddSeconds(9);
-            while (DateTime.Now < until)
+            else
             {
-                Application.DoEvents();
-                Thread.Sleep(20);
+                int remaining = kind == "10" ? 10 : 25;
+                body = L.F("{0}剩余 {1}%", window, remaining) + "\n" +
+                    MultiTooltipCountdown(DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeSeconds());
+                sound = "notify.wav";
+            }
+
+            using (ToastForm form = new ToastForm(L.T("额度提醒"), body, slot, "22***@example.com"))
+            {
+                try
+                {
+                    System.Media.SoundPlayer player = LoadNotifySound(dir, sound);
+                    if (player != null) player.Play();
+                }
+                catch (Exception ex) { Console.Error.WriteLine(ex.Message); }
+                Application.Run(form);
             }
         }
 
@@ -2711,16 +3471,15 @@ namespace QuotaTrayApp
             Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                if (!string.IsNullOrEmpty(wavPath) && File.Exists(wavPath))
-                {
-                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wavPath);
-                    sp.Play();
-                }
+                string dir=Path.GetDirectoryName(Application.ExecutablePath);
+                System.Media.SoundPlayer sp=LoadNotifySound(dir, string.IsNullOrEmpty(wavPath)?"notify.wav":Path.GetFileName(wavPath));
+                if(sp!=null)sp.Play();
             }
             catch { }
 
             L.AutoDetect();
-            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度只剩 10%｜1 小时 51 分后恢复"));
+            UiTheme.Set("auto");
+            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度只剩 10%｜1 小时 51 分后恢复"), "a");
             f.Show();
             DateTime until = DateTime.Now.AddSeconds(9);
             while (DateTime.Now < until)
@@ -2739,16 +3498,15 @@ namespace QuotaTrayApp
 
             try
             {
-                if (File.Exists(wavPath))
-                {
-                    System.Media.SoundPlayer sp = new System.Media.SoundPlayer(wavPath);
-                    sp.Play();
-                }
+                string soundDir=Path.GetDirectoryName(Application.ExecutablePath);
+                System.Media.SoundPlayer sp=LoadNotifySound(soundDir, string.IsNullOrEmpty(wavPath)?"notify.wav":Path.GetFileName(wavPath));
+                if(sp!=null)sp.Play();
             }
             catch { }
 
             L.AutoDetect();
-            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度还剩 19%｜2 小时 22 分后恢复"));
+            UiTheme.Set("auto");
+            ToastForm f = new ToastForm(L.T("额度提醒"), L.T("5 小时额度还剩 19%｜2 小时 22 分后恢复"), "a");
             f.Show();
             for (int i = 0; i < 24; i++)
             {
@@ -2945,8 +3703,12 @@ namespace QuotaTrayApp
         }
 
         // ---------- 详情窗口 ----------
-        private void ShowDetail()
+        private void ShowDetail() { ShowSettingsPage("accounts"); }
+        private void ShowDetailPreview()
         {
+            if (accountDiscoveryPending) { pendingDetails = true; return; }
+            string detailAccountSlot = viewAccountSlot;
+            string detailAccountLabel = viewAccountLabel;
             if (!hasData)
             {
                 string body = string.IsNullOrEmpty(lastError)
@@ -2962,7 +3724,7 @@ namespace QuotaTrayApp
 
             using (Form f = new Form())
             {
-                f.Text = L.T("Codex 额度");
+                f.Text = string.IsNullOrEmpty(detailAccountLabel) ? L.T("Codex 额度") : detailAccountLabel + " · " + L.T("额度详情");
                 f.FormBorderStyle = FormBorderStyle.FixedDialog;
                 f.StartPosition = FormStartPosition.CenterScreen;
                 f.MaximizeBox = false;
@@ -2978,7 +3740,7 @@ namespace QuotaTrayApp
                 }
 
                 Label planLabel = new Label();
-                planLabel.Text = L.F("套餐：{0}", plan);
+                planLabel.Text = string.IsNullOrEmpty(detailAccountLabel) ? L.F("套餐：{0}", plan) : detailAccountLabel;
                 planLabel.Location = new Point(18, 16);
                 planLabel.AutoSize = true;
                 planLabel.BackColor = detailBg;
@@ -2986,14 +3748,16 @@ namespace QuotaTrayApp
                 f.Controls.Add(planLabel);
 
                 // Pro 只有一个周额度：详情窗就一块，不摆"不限制"的空块
-                bool singleWindow = primaryUsed < 0 && secondaryUsed >= 0;
+                bool shortOnly = multiMode && primaryUsed >= 0 && secondaryUsed < 0;
+                bool singleWindow = shortOnly || (primaryUsed < 0 && secondaryUsed >= 0);
                 int btnY = 272;
                 if (singleWindow)
                 {
                     f.ClientSize = new Size(420, 216);
                     btnY = 162;
-                    f.Controls.Add(BuildQuotaGroup(L.F("{0} 天额度", secondaryDays), secondaryUsed, secondaryReset,
-                        new Point(16, 46), true));
+                    f.Controls.Add(BuildQuotaGroup(shortOnly ? L.T("5 小时额度") : L.F("{0} 天额度", secondaryDays),
+                        shortOnly ? primaryUsed : secondaryUsed, shortOnly ? primaryReset : secondaryReset,
+                        new Point(16, 46), !shortOnly));
                 }
                 else
                 {
@@ -3001,6 +3765,18 @@ namespace QuotaTrayApp
                         new Point(16, 46), false));
                     f.Controls.Add(BuildQuotaGroup(L.F("{0} 天额度", secondaryDays), secondaryUsed, secondaryReset,
                         new Point(16, 156), true));
+                }
+
+                if (!string.IsNullOrEmpty(lastError))
+                {
+                    Label failure = new Label();
+                    failure.Text = L.T("更新失败") + " · " + L.T("最后成功") + " " +
+                        (lastOkAt == DateTime.MinValue ? L.T("暂无") : lastOkAt.ToString("MM-dd HH:mm"));
+                    failure.SetBounds(18, btnY, 384, 36);
+                    failure.ForeColor = detailDark ? Color.FromArgb(255, 180, 120) : Color.DarkRed;
+                    f.Controls.Add(failure);
+                    btnY += 40;
+                    f.ClientSize = new Size(f.ClientSize.Width, f.ClientSize.Height + 40);
                 }
 
                 Button refreshBtn = new Button();
@@ -3032,7 +3808,11 @@ namespace QuotaTrayApp
                     }
                 }
 
-                if (f.ShowDialog() == DialogResult.OK) refreshNow.Set();
+                if (f.ShowDialog() == DialogResult.OK)
+                {
+                    if (multiMode && multiAccounts != null && !string.IsNullOrEmpty(detailAccountSlot)) multiAccounts.RefreshAccount(detailAccountSlot);
+                    else refreshNow.Set();
+                }
             }
         }
 
@@ -3158,11 +3938,19 @@ namespace QuotaTrayApp
             catch { }
         }
 
+        private void Shutdown() { Dispose(); ExitThread(); }
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && !contextDisposed)
             {
+                contextDisposed = true;
                 try { stopWorker.Set(); } catch { }
+                try { if (accountForm != null && !accountForm.IsDisposed) accountForm.StopForExit(); } catch { }
+                try { if (multiAccounts != null) multiAccounts.Dispose(); } catch { }
+                try { if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Close(); } catch { }
+                try { if (accountForm != null && !accountForm.IsDisposed) accountForm.Close(); } catch { }
+                try { accountsRequest.Dispose(); settingsRequest.Dispose(); displayRequest.Dispose(); detailsRequest.Dispose(); exitRequest.Dispose(); groupTestRequest.Dispose(); } catch { }
                 try { uiTimer.Stop(); uiTimer.Dispose(); } catch { }
                 try { if (tray != null) { tray.Visible = false; tray.Dispose(); } } catch { }
                 try { if (currentIcon != null) currentIcon.Dispose(); } catch { }

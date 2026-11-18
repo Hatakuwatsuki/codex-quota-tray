@@ -1,157 +1,22 @@
-Codex Quota Tray 额度显示器
-===========================
+GPT 额度显示器 1.9.17.0
 
-Windows 托盘的额度小工具：一眼看到 Codex 还剩多少额度，快用完时先喊你一声，
-免得对话说着说着就被截断。
+新装
+从 GitHub Release 下载 CodexQuotaTray-1.9.17.0.exe 并运行。
+三种提示音内嵌于 EXE。以前放在程序旁的同名 WAV 仍可作为自定义音效。
+需要查询额度时，在设置里选择 Codex 查询程序并绑定账号。
 
-【怎么用】
+升级
+旧程序还在运行时，把下载的 EXE 放进旧程序所在文件夹，保留下载时的文件名，然后双击新版。
+新版会识别同一文件夹里正在运行的旧版，关闭它、替换原 EXE 并重启。
+支持退出请求的旧版会正常退出，更早的托盘版可能需要结束进程。
+更新会在同目录保留旧 EXE 的备份。原文件名、快捷方式、设置和账号绑定可继续使用。
+旧程序已退出时，可将下载的 EXE 改成旧文件名后覆盖。
+如果更早的版本尚未建立本工具的账号绑定，请在账号页手动绑定。
 
-1. 从 Releases 下载 CodexQuotaTray-x.x.x.x.exe，放到一个你能写入的文件夹
-   （文档、桌面、U 盘都行，别放 Program Files）。
-2. 双击运行，右下角通知区域出现一个圆环图标。
-3. 第一次运行会自动在桌面建一个快捷方式。
+使用
+右键托盘图标可刷新、打开设置或退出。设置支持中、英、日文。
+无绑定时不会查询额度。首次自动找不到 Codex 后，请手动选择程序。
+5 小时和 7 天额度分别显示，提醒可按账号设定。
+程序设置保存在 EXE 同目录。账号授权由 Codex 和 Windows 凭据库管理。
 
-  上段（小）= 5 小时额度
-  下段（大）= 7 天额度
-  彩色 = 还剩多少，灰色 = 已经用掉多少
-
-Pro 套餐只有 7 天额度，图标会变成一个完整的圆环，悬停提示也只有一行。
-
-鼠标悬停看「还剩多少 + 多久后恢复」。
-
-【右键菜单】
-
-  刷新 / 额度详情
-  ——————
-  额度提醒（关闭提醒 / 低档 / 中档 / 高档）
-  开机自启动
-  语言（自动 / 中文 / 日本語 / English）
-  识别 Codex…
-  ——————
-  创建桌面快捷方式
-  ——————
-  退出
-
-【提醒什么时候响】
-
-提醒按「已经用掉多少」触发，弹窗里写的是「还剩多少」：
-
-  低档（默认）：剩 25%、剩 10%
-  中档：剩 75%、剩 25%、剩 10%
-  高档：剩 75%、剩 50%、剩 25%、剩 10%
-
-「5 小时额度」按上面的档位走；「7 天额度」不看档位，固定只在剩 25% 和剩 10% 时各提醒一次。
-Pro 套餐只有 7 天额度，档位直接作用在它上面。
-
-额度真的用光时会再各弹一次「已耗尽」。每轮额度只响一次，额度重置后重新生效。
-
-弹窗是从屏幕右侧滑进来的卡片，7 秒后自己滑回去，点一下或点右上角 × 可以提前关。
-它不抢焦点，不会打断你正在打的字。
-
-【提示音】
-
-程序同目录的三个 WAV：
-
-  notify.wav              档位提醒
-  notify-5h-empty.wav     5 小时额度耗尽
-  notify-7d-empty.wav     7 天额度耗尽
-
-换成你自己的：WAV 格式、16 位 PCM、建议 1~2 秒。MP3 不行，.NET 自带播放器只认 WAV。
-删掉文件就只弹窗不出声。
-
-【语言】
-
-右键菜单「语言」里切换，立刻生效，不用重启。
-「自动」跟随 Windows 显示语言：中文系统中文、日文系统日文、其它英文。
-
-【找不到 Codex 怎么办】
-
-程序会自动找 Codex，找的顺序是：环境变量 CODEX_CLI_PATH → 正在运行的 Codex 进程
-→ %LOCALAPPDATA%\OpenAI\Codex\bin → 商店版安装目录 → PATH。
-
-自动找不到时（比如 Codex 装在非默认位置，或者你换了机器），程序会弹一个「找不到 Codex」的窗口：
-
-  自动搜寻 —— 再按上面的顺序搜一遍，找到了会填进输入框
-  选择…    —— 选 Codex 的安装文件夹，或者直接选 Codex.exe，都行
-  确定      —— 保存下来，之后一直用这个路径
-
-想重新指定：右键托盘图标 → 识别 Codex…。路径记在 settings.txt 的 codexPath。
-
-【数据存在哪】
-
-全部在 exe 同一个文件夹里：日志、缓存、图标、settings.txt。
-想换位置，把整个文件夹搬走，别单独挪 exe。
-
-settings.txt 只有两行，可以手改：
-
-  notifyLevel=low      # off / low / medium / high
-  language=auto        # auto / zh / ja / en
-
-【不想要桌面图标跟着变】
-
-在这个文件夹里新建一个空文件，名字叫 disable-desktop-icon.txt，重启程序即可。
-删掉这个文件就恢复。
-
-【怎么退出】
-
-右键托盘图标 → 退出。不装服务，不常驻后台进程。
-
-【更新】
-
-先右键退出，再用新版 exe 覆盖旧的。设置和提示音都留着。
-
-【第一次运行可能会被拦】
-
-这是个人做的开源小工具，没有买代码签名证书，所以 Windows 可能提示
-「Windows 已保护你的电脑」，或者杀毒软件报未知程序。
-点「更多信息」→「仍要运行」即可。
-
-【前提条件】
-
-电脑上要装好并登录过 Codex 桌面版。
-本程序不碰你的账号，只是读本机 Codex 已登录的状态，问一句「我还剩多少额度」。
-
-用 API Key 登录（不是 ChatGPT 账号）的账号，Codex 接口不返回额度数据，
-这时托盘会显示读取失败——这是接口限制，不是程序坏了。
-
-【常见问题】
-
-问：图标一直显示「正在读取额度」，没有数字。
-答：先确认 Codex 桌面版能正常打开，并且已经登录。还不行就看 exe 同目录的 tray.log。
-
-问：装了新版但界面没变。
-答：程序有单实例限制，先确认老版本已经完全退出（托盘图标消失）再启动新版本。
-
-问：桌面图标不动了。
-答：检查同目录有没有 disable-desktop-icon.txt。
-
-【说明】
-
-非官方工具，与 OpenAI 没有隶属关系。
-MIT 许可证，源码见 https://github.com/Hatakuwatsuki/codex-quota-tray
-
----
-
-[English]
-
-A tiny Windows tray app that shows how much Codex / ChatGPT quota you have left
-and warns you before it runs out.
-
-How to use: download CodexQuotaTray-x.x.x.x.exe from Releases, put it in a folder
-you can write to, and run it. A ring appears in the notification area. Hover it
-for the remaining percentage and reset time.
-
-Requirements: the Codex desktop app, signed in with a ChatGPT account. The app
-never asks for credentials; it reads the local Codex app-server.
-
-Alerts (based on what's left): Low 25% / 10%, Medium 75% / 25% / 10%,
-High 75% / 50% / 25% / 10%. The 7-day allowance on Plus plans always uses 25% and
-10%. A separate card appears when an allowance hits zero.
-
-Languages: 中文 / 日本語 / English, switchable from the menu; Auto follows the
-Windows display language.
-
-Settings live in settings.txt next to the exe. Alert sounds are the three WAV
-files next to the exe; replace them with your own (16-bit PCM).
-
-Not affiliated with OpenAI. MIT licensed.
+非官方工具，与 OpenAI 无隶属关系。MIT 许可。
