@@ -25,6 +25,6 @@ Windows 托盘工具，可查看已绑定 Codex 账号的 5 小时和 7 天额�
 
 ## 隐私
 
-程序只读取本机 Codex 已登录的账号状态，并向 OpenAI 查询额度，不发送模型对话。账号授权保存在本机 Windows 凭据库，不随 exe 复制到其他电脑。
+所有的数据都只在本地运行：设置、日志和账号状态在 exe 同目录，账号资料在 `%LOCALAPPDATA%\CodexQuotaTray\accounts`。
 
 非官方工具，与 OpenAI 无隶属关系。MIT 许可。
