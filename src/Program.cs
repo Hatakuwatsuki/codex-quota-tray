@@ -9,6 +9,7 @@
 //  编译：csc /target:winexe（见 rebuild.ps1）
 // ============================================================
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -17,6 +18,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -24,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.42.0")]
+[assembly: AssemblyVersion("1.9.43.0")]
 
 namespace QuotaTrayApp
 {
@@ -205,6 +207,11 @@ namespace QuotaTrayApp
                 }
             }
 
+            if (args != null && args.Length == 2 && args[0] == "--update-window")
+            {
+                ReleaseUpdates.RunWindow(Application.ExecutablePath, args[1]);
+                return;
+            }
             if ((args == null || args.Length == 0) && PortableUpgrade.TryRun(Application.ExecutablePath)) return;
 
             bool createdNew;
@@ -231,101 +238,251 @@ namespace QuotaTrayApp
 
     internal static class PortableUpgrade
     {
+        private static readonly string[] StableNames = { "额度显示器.exe", "CodexQuotaTray.exe" };
+
         internal static bool TryRun(string source)
         {
             Version incoming = Assembly.GetExecutingAssembly().GetName().Version;
-            if (!String.Equals(Path.GetFileName(source), "CodexQuotaTray-" + incoming + ".exe", StringComparison.OrdinalIgnoreCase))
-                return false;
+            if (!IsReleaseName(Path.GetFileName(source), incoming)) return false;
+
             using (var guard = new Mutex(false, "CodexQuotaTrayPortableUpgrade"))
             {
                 try { if (!guard.WaitOne(0)) return true; }
                 catch (AbandonedMutexException) { }
+
                 try
                 {
-                    int session;
-                    using (Process current = Process.GetCurrentProcess()) session = current.SessionId;
-                    foreach (Process process in Process.GetProcesses())
-                    using (process)
+                    using (Process active = FindRunning(null))
                     {
-                        string target = OlderSibling(process, source, incoming, session);
-                        if (target == null) continue;
-                        try { Replace(process, source, target); }
-                        catch (Exception error)
+                        string activePath = active == null ? null : active.MainModule.FileName;
+                        string target = ResolveTarget(source, activePath, ReadDesktopTargets());
+                        if (target == null) return false;
+                        if (activePath != null && !SamePath(activePath, target))
+                            throw new IOException("Another copy of Codex Quota Tray is running from " + activePath);
+
+                        Version previous = ReadVersion(target);
+                        if (previous == null) throw new IOException("The target executable changed during update.");
+                        if (incoming <= previous)
                         {
-                            string explanation = L.Guess("auto") == "zh"
-                                ? "更新未完成。请关闭额度显示器后再试。"
-                                : "The update could not finish. Close Quota Display and try again.";
-                            MessageBox.Show(explanation + "\n\n" + error.Message, "Codex Quota Tray",
-                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            StartTarget(target, "--settings");
+                            return true;
                         }
+
+                        using (Process running = FindRunning(target))
+                            Replace(running, source, target, previous, Program.SettingsRequestName(new[] { "--exit" }));
                         return true;
                     }
-                    return false;
+                }
+                catch (Exception error)
+                {
+                    string language = L.Guess("auto");
+                    string explanation = language == "zh" ? "更新未完成。请确认打开的是要升级的额度显示器。"
+                        : language == "ja" ? "更新できませんでした。更新対象のアプリを確認してください。"
+                        : "The update could not finish. Check which copy of Codex Quota Tray you want to update.";
+                    MessageBox.Show(explanation + "\n\n" + error.Message, "Codex Quota Tray",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return true;
                 }
                 finally { guard.ReleaseMutex(); }
             }
         }
 
-        private static string OlderSibling(Process process, string source, Version incoming, int session)
+        internal static bool IsReleaseName(string name, Version version)
         {
-            try
-            {
-                string name = process.ProcessName;
-                if (process.SessionId != session) return null;
-                if (name != "额度显示器" && !name.Equals("CodexQuotaTray", StringComparison.OrdinalIgnoreCase)
-                    && !name.StartsWith("CodexQuotaTray-", StringComparison.OrdinalIgnoreCase)) return null;
-                string target = process.MainModule.FileName;
-                if (!String.Equals(Path.GetDirectoryName(target), Path.GetDirectoryName(source), StringComparison.OrdinalIgnoreCase) ||
-                    String.Equals(target, source, StringComparison.OrdinalIgnoreCase)) return null;
-                FileVersionInfo info = FileVersionInfo.GetVersionInfo(target);
-                Version previous;
-                return info.ProductName == "Codex Quota Tray" && Version.TryParse(info.FileVersion, out previous) &&
-                    previous.Major == 1 && previous < incoming ? target : null;
-            }
-            catch (System.ComponentModel.Win32Exception) { return null; }
-            catch (InvalidOperationException) { return null; }
-            catch (IOException) { return null; }
+            string prefix = "CodexQuotaTray-" + version;
+            return Regex.IsMatch(name, "^" + Regex.Escape(prefix) + @"(?: ?\([1-9]\d*\))?\.exe$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
-        private static void Replace(Process process, string source, string target)
+        internal static string ResolveTarget(string source, string active, IEnumerable<string> desktopTargets)
+        {
+            string directory = Path.GetDirectoryName(source);
+            if (!IsCandidate(active, source)) active = null;
+            if (active != null && SamePath(Path.GetDirectoryName(active), directory)) return active;
+
+            var linked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var linkedHere = new List<string>();
+            foreach (string path in desktopTargets)
+            {
+                if (!IsCandidate(path, source) || !linked.Add(path)) continue;
+                if (SamePath(Path.GetDirectoryName(path), directory)) linkedHere.Add(path);
+            }
+            if (linkedHere.Count > 0) return OnlyCandidate(linkedHere);
+
+            var local = new List<string>();
+            foreach (string name in StableNames)
+            {
+                string path = Path.Combine(directory, name);
+                if (IsCandidate(path, source)) local.Add(path);
+            }
+            if (local.Count > 0) return OnlyCandidate(local);
+
+            if (active != null) linked.Add(active);
+            if (linked.Count > 0) return OnlyCandidate(linked);
+            if (!File.Exists(Path.Combine(directory, "settings.txt")) &&
+                !File.Exists(Path.Combine(directory, "multi-account-status.json"))) return null;
+
+            foreach (string path in Directory.EnumerateFiles(directory, "CodexQuotaTray-*.exe"))
+            {
+                if (Regex.IsMatch(Path.GetFileName(path), @"^CodexQuotaTray-\d+(?:\.\d+){3}(?: ?\([1-9]\d*\))?\.exe$",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) && IsCandidate(path, source))
+                    local.Add(path);
+            }
+            return OnlyCandidate(local);
+        }
+
+        private static string OnlyCandidate(IEnumerable<string> paths)
+        {
+            string selected = null;
+            foreach (string path in paths)
+            {
+                if (selected != null)
+                    throw new IOException("More than one copy was found. Open the copy you want to update, then run the download from its folder.");
+                selected = path;
+            }
+            return selected;
+        }
+
+        private static IEnumerable<string> ReadDesktopTargets()
+        {
+            foreach (var shortcut in TrayContext.ReadDesktopShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)))
+                yield return shortcut.Value;
+        }
+
+        private static bool SamePath(string left, string right) { return String.Equals(left, right, StringComparison.OrdinalIgnoreCase); }
+
+        private static bool IsCandidate(string path, string source)
+        {
+            return !SamePath(path, source) && ReadVersion(path) != null;
+        }
+
+        internal static Version ReadVersion(string path)
+        {
+            if (!File.Exists(path)) return null;
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return null;
+            FileVersionInfo info = FileVersionInfo.GetVersionInfo(path);
+            Version version;
+            return info.ProductName == "Codex Quota Tray" && Version.TryParse(info.FileVersion, out version)
+                && version.Major >= 1 ? version : null;
+        }
+
+        private static Process FindRunning(string target)
+        {
+            int session, id;
+            using (Process current = Process.GetCurrentProcess()) { session = current.SessionId; id = current.Id; }
+            Process match = null;
+            Process[] processes = target == null ? Process.GetProcesses() : Process.GetProcessesByName(Path.GetFileNameWithoutExtension(target));
+            foreach (Process process in processes)
+            {
+                try
+                {
+                    if (match != null || process.Id == id || process.SessionId != session) continue;
+                    if (target == null)
+                    {
+                        string name = process.ProcessName;
+                        if (!SamePath(name, "额度显示器") && !SamePath(name, "CodexQuotaTray") &&
+                            !Regex.IsMatch(name, @"^CodexQuotaTray-[0-9]", RegexOptions.IgnoreCase)) continue;
+                    }
+                    string path = process.MainModule.FileName;
+                    if (target == null ? ReadVersion(path) != null : SamePath(path, target)) match = process;
+                }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (InvalidOperationException) { }
+                catch (IOException) { }
+                finally { if (process != match) process.Dispose(); }
+            }
+            return match;
+        }
+
+        private static void StopTarget(Process process, Version previous, string exitSignal)
+        {
+            if (process == null || process.HasExited) return;
+            EventWaitHandle exit;
+            if (previous >= new Version(1, 8, 1, 0))
+            {
+                if (!EventWaitHandle.TryOpenExisting(exitSignal, out exit))
+                {
+                    if (process.HasExited) return;
+                    throw new IOException("The running version is not ready to accept an exit request.");
+                }
+                using (exit) exit.Set();
+                if (!process.WaitForExit(30000))
+                    throw new IOException("The running version did not respond to the exit request.");
+                return;
+            }
+
+            process.CloseMainWindow();
+            if (process.WaitForExit(2200)) return;
+            process.Kill();
+            if (!process.WaitForExit(6000)) throw new IOException("The old process did not exit.");
+        }
+
+        private static void StartTarget(string target, string argument)
+        {
+            using (Process process = Process.Start(new ProcessStartInfo(target, argument) {
+                WorkingDirectory = Path.GetDirectoryName(target), UseShellExecute = false }))
+            {
+                if (process == null || (argument == "--startup" && process.WaitForExit(1200)))
+                    throw new IOException("Could not restart the updated executable.");
+            }
+        }
+
+        internal static void ApplyVerified(string source, string target, Version previous, Action beforeRestart)
+        {
+            using (var guard = new Mutex(false, "CodexQuotaTrayPortableUpgrade"))
+            {
+                try
+                {
+                    if (!guard.WaitOne(0)) throw new IOException("Another update is in progress.");
+                }
+                catch (AbandonedMutexException) { }
+                try
+                {
+                    using (Process running = FindRunning(target))
+                        Replace(running, source, target, previous, Program.SettingsRequestName(new[] { "--exit" }), beforeRestart);
+                }
+                finally { guard.ReleaseMutex(); }
+            }
+        }
+
+        internal static void Replace(Process process, string source, string target, Version previous, string exitSignal, Action beforeRestart = null)
         {
             string pending = target + "." + Guid.NewGuid().ToString("N") + ".update";
             string backup = pending + ".backup";
-            File.Copy(source, pending);
             try
             {
-                EventWaitHandle exit = null;
-                Version previous = Version.Parse(FileVersionInfo.GetVersionInfo(target).FileVersion);
-                bool cooperative = previous >= new Version(1, 8, 1, 0) &&
-                    EventWaitHandle.TryOpenExisting(Program.SettingsRequestName(new[] { "--exit" }), out exit);
-                if (cooperative) using (exit) exit.Set();
-                else process.CloseMainWindow();
-                if (!process.WaitForExit(cooperative ? 12000 : 2200))
-                {
-                    if (cooperative) throw new IOException("The running version did not respond to the exit request.");
-                    // Releases without an exit event have a tray-only message loop.
-                    process.Kill();
-                    if (!process.WaitForExit(6000)) throw new IOException("The old process did not exit.");
-                }
-
+                File.Copy(source, pending);
+                StopTarget(process, previous, exitSignal);
+                if (ReadVersion(target) != previous)
+                    throw new IOException("The target executable changed during update.");
                 File.Replace(pending, target, backup);
+                if (beforeRestart != null) beforeRestart();
+                StartTarget(target, "--startup");
+            }
+            catch (Exception error)
+            {
                 try
                 {
-                    using (Process restarted = Process.Start(new ProcessStartInfo(target) {
-                        WorkingDirectory = Path.GetDirectoryName(target), UseShellExecute = false }))
+                    if (File.Exists(backup))
                     {
-                        if (restarted == null) throw new IOException("Could not restart Quota Display.");
+                        if (File.Exists(target)) File.Replace(backup, target, null);
+                        else File.Move(backup, target);
                     }
+                    if (process != null && process.HasExited && File.Exists(target))
+                        StartTarget(target, "--startup");
                 }
-                catch
+                catch (Exception restoreError)
                 {
-                    File.Replace(backup, target, null);
-                    throw;
+                    throw new IOException(error.Message + "\n" + restoreError.Message +
+                        (File.Exists(backup) ? "\nBackup: " + backup : ""), error);
                 }
+                throw;
             }
             finally
             {
-                if (File.Exists(pending)) File.Delete(pending);
+                try { File.Delete(pending); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
     }
@@ -449,6 +606,17 @@ namespace QuotaTrayApp
             }
             // ---------- 菜单与窗口 ----------
             En["额度显示器"] = "Quota Tray";
+            En["有新版本"] = "Update available";
+            En["最新版本 {0}"] = "Latest version {0}";
+            En["正在更新"] = "Updating";
+            En["正在检查更新…"] = "Checking for updates…";
+            En["未找到可以应用的更新。"] = "No update is available to install.";
+            En["正在下载 {0}…"] = "Downloading {0}…";
+            En["正在替换程序文件…"] = "Replacing application files…";
+            En["更新已完成"] = "Update completed";
+            En["更新失败"] = "Update failed";
+            En["已更新到 {0}"] = "Updated to {0}";
+            En["正在启动额度显示器…"] = "Starting Quota Tray…";
             En["刷新"] = "Refresh";
             En["额度详情"] = "Quota details";
             En["额度提醒"] = "Quota alerts";
@@ -465,6 +633,17 @@ namespace QuotaTrayApp
             En["自动"] = "Auto";
 
             Ja["额度显示器"] = "クォータトレイ";
+            Ja["有新版本"] = "新しいバージョンがあります";
+            Ja["最新版本 {0}"] = "最新バージョン {0}";
+            Ja["正在更新"] = "更新中";
+            Ja["正在检查更新…"] = "更新を確認中…";
+            Ja["未找到可以应用的更新。"] = "適用できる更新がありません。";
+            Ja["正在下载 {0}…"] = "{0} をダウンロード中…";
+            Ja["正在替换程序文件…"] = "プログラムファイルを置き換え中…";
+            Ja["更新已完成"] = "更新が完了しました";
+            Ja["更新失败"] = "更新できませんでした";
+            Ja["已更新到 {0}"] = "{0} に更新しました";
+            Ja["正在启动额度显示器…"] = "クォータトレイを起動中…";
             Ja["刷新"] = "更新";
             Ja["额度详情"] = "残量の詳細";
             Ja["额度提醒"] = "残量アラート";
@@ -1926,6 +2105,7 @@ namespace QuotaTrayApp
         private ToolStripMenuItem menuAutoStart, menuShortcut, menuExit, menuLang, menuAccounts, menuDisplay, menuAccountHeader;
         private AccountConnectionForm accountForm;
         private QuotaSettingsForm quotaSettingsForm;
+        private readonly ReleaseUpdates releaseUpdates;
         private MultiAccountController multiAccounts;
         private volatile bool multiMode;
         private bool accountDiscoveryPending;
@@ -1966,6 +2146,7 @@ namespace QuotaTrayApp
             // 绿色版：数据优先放 exe 同目录（真便携）；目录不可写才退到 %APPDATA%。
             // 当前安装的 exe 本来就在 ~/.codex/quota-tray 下，所以这对老部署完全兼容。
             root = ResolveDataDir();
+            releaseUpdates = new ReleaseUpdates(Application.ExecutablePath, root, Log);
             try { Directory.CreateDirectory(root); } catch { }
             logPath = Path.Combine(root, "tray.log");
             settings = AppSettings.Load(root);
@@ -2179,8 +2360,10 @@ namespace QuotaTrayApp
                 }
                 PumpResults();
                 PumpAccountToasts();
+                if (!noDesktopTouch) PumpReleaseUpdates();
             };
             uiTimer.Start();
+            if (!noDesktopTouch) releaseUpdates.Check(false);
 
             worker = new Thread(WorkerLoop);
             worker.IsBackground = true;
@@ -2193,12 +2376,21 @@ namespace QuotaTrayApp
         }
 
         private void ShowDisplaySettings() { ShowSettingsPage("display"); }
+        private void PumpReleaseUpdates()
+        {
+            releaseUpdates.Check(false);
+            Version found = releaseUpdates.TakeNotification();
+            if (found == null) return;
+            try { ShowBalloon(L.T("有新版本"), L.F("最新版本 {0}", found)); }
+            catch (Exception error) { Log("版本通知失败：" + error.Message); }
+        }
         internal void RefreshSettingsAccounts()
         {
             if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.RefreshAccounts();
         }
         internal void ShowSettingsPage(string page)
         {
+            releaseUpdates.Check(false);
             if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed)
             {
                 quotaSettingsForm.Navigate(page); UiTheme.Present(quotaSettingsForm); return;
@@ -2224,6 +2416,9 @@ namespace QuotaTrayApp
             actions.SetLanguage = delegate(string language) { SetLanguage(language); if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Reload(); };
             actions.SetTheme = delegate(string theme) { settings.theme = UiTheme.Normalize(theme); settings.Save(root); UiTheme.Set(settings.theme); };
             actions.SetAutoStart = delegate(bool enabled) { return SetAutoStart(enabled); };
+            actions.ReadUpdate = delegate { return releaseUpdates.State; };
+            actions.CheckUpdate = delegate { releaseUpdates.Check(true); };
+            actions.ApplyUpdate = releaseUpdates.Install;
             quotaSettingsForm = new QuotaSettingsForm(actions, page);
             quotaSettingsForm.FormClosed += delegate { quotaSettingsForm = null; };
             UiTheme.Present(quotaSettingsForm);
@@ -3080,8 +3275,15 @@ namespace QuotaTrayApp
 
         internal static string FindDesktopShortcut(string desktop, string executable)
         {
+            foreach (var shortcut in ReadDesktopShortcuts(desktop))
+                if (String.Equals(shortcut.Value, executable, StringComparison.OrdinalIgnoreCase)) return shortcut.Key;
+            return null;
+        }
+
+        internal static IEnumerable<KeyValuePair<string, string>> ReadDesktopShortcuts(string desktop)
+        {
             Type shellType = Type.GetTypeFromProgID("WScript.Shell");
-            if (shellType == null || string.IsNullOrEmpty(desktop)) return null;
+            if (shellType == null || string.IsNullOrEmpty(desktop)) yield break;
             object shell = Activator.CreateInstance(shellType);
             try
             {
@@ -3090,15 +3292,18 @@ namespace QuotaTrayApp
                 {
                     string path = Path.Combine(desktop, name);
                     if (!File.Exists(path)) continue;
-                    object link = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { path });
+                    object link = null;
+                    string target;
                     try
                     {
-                        string target = (string)link.GetType().InvokeMember("TargetPath", BindingFlags.GetProperty, null, link, null);
-                        if (string.Equals(target, executable, StringComparison.OrdinalIgnoreCase)) return path;
+                        link = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { path });
+                        target = (string)link.GetType().InvokeMember("TargetPath", BindingFlags.GetProperty, null, link, null);
                     }
-                    finally { Marshal.ReleaseComObject(link); }
+                    catch (COMException) { continue; }
+                    catch (TargetInvocationException) { continue; }
+                    finally { if (link != null) Marshal.ReleaseComObject(link); }
+                    if (!String.IsNullOrEmpty(target)) yield return new KeyValuePair<string, string>(path, target);
                 }
-                return null;
             }
             finally { Marshal.ReleaseComObject(shell); }
         }

@@ -27,6 +27,9 @@ namespace QuotaTrayApp
         internal Func<int, bool> ApplyGlobalLevel;
         internal Action<string> SetLanguage, SetTheme;
         internal Func<bool, bool> SetAutoStart;
+        internal Func<UpdateStatus> ReadUpdate;
+        internal Action CheckUpdate, ApplyUpdate;
+        internal Func<Version> ReadVersion;
     }
 
     internal sealed class QuotaSettingsForm : UiWindow
@@ -36,8 +39,13 @@ namespace QuotaTrayApp
         private readonly RadioButton[] navigation = new RadioButton[4];
         private bool updatingNavigation, resizingCards;
         private readonly System.Windows.Forms.Timer themeTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer currentNoticeTimer = new System.Windows.Forms.Timer();
         private readonly ToolTip tips = new ToolTip();
         private Label versionLabel;
+        private UpdateVersionRange versionRange;
+        private Button updateButton, checkUpdateButton;
+        private Label updateMessage;
+        private UpdateStatus updateStatus;
         private bool cardLayoutQueued;
         private int? pendingGlobalLevel;
         private readonly Dictionary<string, FlowLayoutPanel> accountQuotaRows = new Dictionary<string, FlowLayoutPanel>();
@@ -78,6 +86,16 @@ namespace QuotaTrayApp
             { "独立设置每个账号的提醒", new string[] { "アカウントごとの通知を設定", "Set alerts for each account" } },
             { "语言与系统", new string[] { "言語とシステム", "Language & system" } },
             { "程序与快捷方式", new string[] { "アプリとショートカット", "App & shortcuts" } },
+            { "软件更新", new string[] { "アプリの更新", "App updates" } },
+            { "检查更新", new string[] { "更新を確認", "Check for updates" } },
+            { "更新", new string[] { "更新", "Update" } },
+            { "正在检查更新…", new string[] { "更新を確認中…", "Checking for updates…" } },
+            { "已是最新版本", new string[] { "最新バージョンです", "You’re up to date" } },
+            { "可更新到 {0}", new string[] { "{0} に更新できます", "Version {0} is available" } },
+            { "正在下载 {0}…", new string[] { "{0} をダウンロード中…", "Downloading {0}…" } },
+            { "正在重启并应用更新…", new string[] { "再起動して更新を適用中…", "Restarting to apply the update…" } },
+            { "检查失败，请重试。", new string[] { "更新を確認できませんでした。再試行してください。", "Could not check for updates. Try again." } },
+            { "更新失败，请重试。", new string[] { "更新できませんでした。再試行してください。", "Could not update. Try again." } },
             { "查询失败，显示上次结果", new string[] { "更新失敗：前回の結果", "Update failed · last result" } },
             { "额度显示器设置", new string[] { "使用量表示の設定", "Quota Display Settings" } },
             { "额度显示器", new string[] { "使用量表示", "Quota Display" } },
@@ -131,11 +149,8 @@ namespace QuotaTrayApp
         }
         private string VersionCaption()
         {
-            string version = typeof(QuotaSettingsForm).Assembly.GetName().Version.ToString(4);
-            string lang = snapshot == null ? "zh" : snapshot.Language;
-            if (lang == "en") return "Version " + version;
-            if (lang == "ja") return "バージョン " + version;
-            return "版本 " + version;
+            return (actions.ReadVersion == null ? typeof(QuotaSettingsForm).Assembly.GetName().Version
+                : actions.ReadVersion()).ToString(4);
         }
 
         internal QuotaSettingsForm(SettingsActions actions, string page)
@@ -190,6 +205,22 @@ namespace QuotaTrayApp
             versionLabel.Location = new Point(S(18), Math.Max(0, ClientSize.Height - versionLabel.PreferredHeight - S(11)));
             Controls.Add(versionLabel);
             versionLabel.BringToFront();
+            if (actions.ApplyUpdate != null)
+            {
+                versionRange = new UpdateVersionRange { Name = "update-version-range", Font = versionFont };
+                Controls.Add(versionRange);
+                versionRange.BringToFront();
+                updateButton = Button("更新", true, delegate { Call(actions.ApplyUpdate); RefreshReleaseStatus(); });
+                updateButton.Name = "version-update";
+                updateButton.AutoSize = false;
+                updateButton.Size = new Size(S(116), ControlHeight);
+                updateButton.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+                updateButton.Visible = false;
+                Controls.Add(updateButton);
+                updateButton.BringToFront();
+                ClientSizeChanged += delegate { PositionVersionFooter(); };
+                versionLabel.SizeChanged += delegate { PositionVersionFooter(); };
+            }
             content.SizeChanged += delegate
             {
                 ResizeCards();
@@ -206,8 +237,9 @@ namespace QuotaTrayApp
             Shown += delegate { ResizeCards(); };
             UiTheme.Hook(this);
             themeTimer.Interval = 2000;
-            themeTimer.Tick += delegate { UiTheme.RefreshSystem(); };
+            themeTimer.Tick += delegate { UiTheme.RefreshSystem(); RefreshReleaseStatus(); };
             themeTimer.Start();
+            currentNoticeTimer.Tick += delegate { RefreshReleaseStatus(true); };
         }
 
         internal string CurrentPage { get { return page; } }
@@ -268,6 +300,7 @@ namespace QuotaTrayApp
             if (versionLabel != null) versionLabel.Text = VersionCaption();
             content.SuspendLayout();
             while (content.Controls.Count > 0) content.Controls[0].Dispose();
+            checkUpdateButton = null; updateMessage = null;
             displayToggles.Clear(); desktopSlots.Clear(); desktop = null; error = null;
             updatingNavigation = true;
             for (int i = 0; i < Pages.Length; i++)
@@ -287,6 +320,7 @@ namespace QuotaTrayApp
             else if (page == "display") DisplayPage();
             else if (page == "notifications") NotificationsPage();
             else GeneralPage();
+            RefreshReleaseStatus(true);
             UiTheme.Apply(this);
             content.ResumeLayout();
             ResizeCards();
@@ -684,6 +718,89 @@ namespace QuotaTrayApp
             buttons.Controls.Add(shortcut); buttons.Controls.Add(exit);
             EqualizeActions(buttons);
             inner.Controls.Add(buttons);
+            if (actions.CheckUpdate != null)
+            {
+                card = Card();
+                inner = Inner(card);
+                Label heading = TextLine("软件更新", true);
+                heading.Margin = new Padding(0, 0, 0, S(8));
+                inner.Controls.Add(heading);
+                checkUpdateButton = Button("检查更新", false, delegate { Call(actions.CheckUpdate); RefreshReleaseStatus(); });
+                checkUpdateButton.Name = "check-update";
+                inner.Controls.Add(checkUpdateButton);
+                updateMessage = TextLine("", false);
+                updateMessage.Name = "update-status";
+                Font statusFont = new Font(Font.FontFamily, 9f);
+                updateMessage.Font = statusFont;
+                updateMessage.Disposed += delegate { statusFont.Dispose(); };
+                updateMessage.Margin = new Padding(CardPaddingSize, S(2), 0, LayoutGap);
+                updateMessage.AccessibleRole = AccessibleRole.StaticText;
+                content.Controls.Add(updateMessage);
+            }
+        }
+
+        private void PositionVersionFooter()
+        {
+            if (updateButton == null) return;
+            bool available = updateStatus != null && updateStatus.Version != null;
+            int bottom = Math.Max(0, ClientSize.Height - S(available ? 21 : 11));
+            updateButton.Location = new Point(S(18), bottom - updateButton.Height);
+            if (!available)
+            {
+                versionLabel.Location = new Point(S(18), bottom - versionLabel.PreferredHeight);
+                return;
+            }
+            int height = versionLabel.PreferredHeight;
+            versionRange.SetBounds(updateButton.Left, updateButton.Top - S(8) - height, updateButton.Width, height);
+        }
+
+        internal void RefreshReleaseStatus(bool force = false)
+        {
+            if (actions.ReadUpdate == null) return;
+            UpdateStatus next = actions.ReadUpdate();
+            if (!force && updateStatus == next) return;
+            updateStatus = next;
+            currentNoticeTimer.Stop();
+            bool busy = next != null && next.Busy;
+            bool hasVersion = next != null && next.Version != null;
+            if (updateButton != null)
+            {
+                versionLabel.Text = VersionCaption();
+                versionLabel.Visible = !hasVersion;
+                versionRange.Visible = hasVersion;
+                if (hasVersion) versionRange.SetVersions(versionLabel.Text, next.Version.ToString(4));
+                updateButton.Text = T("更新");
+                updateButton.Visible = hasVersion;
+                updateButton.Enabled = hasVersion && !busy;
+                tips.SetToolTip(updateButton, hasVersion ? String.Format(T("可更新到 {0}"), next.Version) : "");
+                PositionVersionFooter();
+            }
+            if (checkUpdateButton != null) checkUpdateButton.Enabled = !busy;
+            if (updateMessage == null) return;
+            string text = "";
+            switch (next == null ? UpdatePhase.Idle : next.Phase)
+            {
+                case UpdatePhase.Checking: text = T("正在检查更新…"); break;
+                case UpdatePhase.Current:
+                    int remaining = next.CurrentNoticeRemaining(System.Diagnostics.Stopwatch.GetTimestamp());
+                    if (remaining > 0)
+                    {
+                        text = T("已是最新版本");
+                        currentNoticeTimer.Interval = remaining;
+                        currentNoticeTimer.Start();
+                    }
+                    break;
+                case UpdatePhase.Available: text = String.Format(T("可更新到 {0}"), next.Version); break;
+                case UpdatePhase.Downloading: text = String.Format(T("正在下载 {0}…"), next.Version); break;
+                case UpdatePhase.Installing: text = T("正在重启并应用更新…"); break;
+                case UpdatePhase.CheckFailed: text = T("检查失败，请重试。"); break;
+                case UpdatePhase.InstallFailed: text = T("更新失败，请重试。"); break;
+            }
+            updateMessage.Text = text;
+            updateMessage.Tag = next != null && next.Phase == UpdatePhase.Available;
+            updateMessage.Visible = text.Length > 0;
+            UiTheme.Apply(updateMessage);
+            ResizeCards();
         }
         private void EqualizeActions(FlowLayoutPanel row)
         {
@@ -701,7 +818,239 @@ namespace QuotaTrayApp
             row.Controls[row.Controls.Count - 1].Margin = Padding.Empty;
         }
 
-        protected override void Dispose(bool disposing) { if (disposing) { tips.Dispose(); themeTimer.Dispose(); } base.Dispose(disposing); }
+        private sealed class UpdateVersionRange : Control
+        {
+            private string current = "", next = "";
+
+            internal UpdateVersionRange()
+            {
+                AccessibleRole = AccessibleRole.StaticText;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+
+            internal void SetVersions(string oldVersion, string newVersion)
+            {
+                current = oldVersion;
+                next = newVersion;
+                AccessibleName = current + " → " + next;
+                Invalidate();
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, UiTheme.Sidebar);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics graphics = e.Graphics;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                using (var format = new StringFormat(StringFormat.GenericTypographic))
+                using (var oldInk = new SolidBrush(ForeColor))
+                using (var newInk = new SolidBrush(UiTheme.UpdateBlue))
+                {
+                    format.LineAlignment = StringAlignment.Center;
+                    format.FormatFlags |= StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+                    float oldWidth = graphics.MeasureString(current, Font, PointF.Empty, format).Width;
+                    float newWidth = graphics.MeasureString(next, Font, PointF.Empty, format).Width;
+                    float gap = Math.Max(2f, Height * .16f);
+                    float arrowWidth = Math.Max(11.5f, Height * .73f);
+                    float left = (Width - oldWidth - arrowWidth - newWidth - gap * 2f) / 2f;
+                    float arrowLeft = left + oldWidth + gap;
+                    float newLeft = arrowLeft + arrowWidth + gap;
+                    graphics.DrawString(current, Font, oldInk, new RectangleF(left, 0, oldWidth, Height), format);
+                    graphics.DrawString(next, Font, newInk, new RectangleF(newLeft, 0, newWidth, Height), format);
+
+                    float middle = Height / 2f;
+                    float tail = arrowLeft + .8f;
+                    float tip = arrowLeft + arrowWidth - .8f;
+                    float head = tip - Math.Max(4.4f, arrowWidth * .43f);
+                    float shaft = Math.Max(1.7f, Height * .12f);
+                    float wing = Math.Max(3.3f, Height * .22f);
+                    using (var pen = new Pen(UiTheme.Accent, Math.Max(1f, Height * .063f)) { LineJoin = LineJoin.Round })
+                    {
+                        graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                        graphics.DrawPolygon(pen, new[]
+                        {
+                            new PointF(tail, middle - shaft), new PointF(head, middle - shaft),
+                            new PointF(head, middle - wing), new PointF(tip, middle),
+                            new PointF(head, middle + wing), new PointF(head, middle + shaft),
+                            new PointF(tail, middle + shaft)
+                        });
+                    }
+                }
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { tips.Dispose(); themeTimer.Dispose(); currentNoticeTimer.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+}
+
+namespace QuotaTrayApp
+{
+    internal sealed class ReleaseUpdateDialog : UiWindow
+    {
+        private readonly Label detail;
+        private readonly Label percent;
+        private readonly UpdateTrack track;
+        private readonly Button confirm;
+        private Action restart;
+        private bool working = true;
+
+        internal ReleaseUpdateDialog()
+        {
+            Text = L.T("正在更新");
+            TitlePrimary = Text;
+            ShowIcon = true;
+            MinimizeBox = MaximizeBox = CanResize = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(S(396), S(197));
+
+            var card = new UiCard { Bounds = new Rectangle(S(16), S(52), S(364), S(129)) };
+            Controls.Add(card);
+            detail = new UiLabel
+            {
+                Name = "update-progress-detail", Text = L.T("正在检查更新…"),
+                Bounds = new Rectangle(S(16), S(13), S(332), S(62)),
+                TextAlign = ContentAlignment.TopLeft
+            };
+            track = new UpdateTrack { Name = "update-progress-track", Bounds = new Rectangle(S(16), S(64), S(332), S(7)) };
+            percent = new UiLabel
+            {
+                Name = "update-progress-percent", Bounds = new Rectangle(S(16), S(79), S(332), S(20)),
+                TextAlign = ContentAlignment.MiddleRight
+            };
+            confirm = new UiButton
+            {
+                Name = "update-confirm", Text = L.T("确定"), Accent = true, Visible = false,
+                Bounds = new Rectangle(S(238), S(84), S(110), S(32))
+            };
+            confirm.Click += delegate { Close(); };
+            card.Controls.Add(detail);
+            card.Controls.Add(track);
+            card.Controls.Add(percent);
+            card.Controls.Add(confirm);
+            track.BringToFront();
+            percent.BringToFront();
+            UiTheme.Hook(this);
+        }
+
+        internal void Post(MethodInvoker action)
+        {
+            try { if (IsHandleCreated && !IsDisposed) BeginInvoke(action); }
+            catch (InvalidOperationException) { }
+        }
+
+        internal void SetDownloading(Version version, int progress)
+        {
+            detail.Text = L.F("正在下载 {0}…", version);
+            track.Percent = progress;
+            percent.Text = progress + "%";
+        }
+
+        internal void SetInstalling()
+        {
+            detail.Text = L.T("正在替换程序文件…");
+            track.Percent = 100;
+            percent.Text = "100%";
+        }
+
+        internal void SetComplete(Version version, Action start)
+        {
+            restart = start;
+            ShowResult(L.T("更新已完成"), L.F("已更新到 {0}", version));
+        }
+
+        internal void SetFailure(string message)
+        {
+            restart = null;
+            ShowResult(L.T("更新失败"), message);
+        }
+
+        private void ShowResult(string title, string message)
+        {
+            working = false;
+            TitlePrimary = Text = title;
+            detail.Text = message;
+            track.Visible = percent.Visible = false;
+            confirm.Visible = confirm.Enabled = true;
+            AcceptButton = confirm;
+            confirm.Focus();
+        }
+
+        internal void Finish()
+        {
+            working = false;
+            restart = null;
+            Close();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                if (working) e.Cancel = true;
+                else if (restart != null)
+                {
+                    Action start = restart;
+                    restart = null;
+                    working = e.Cancel = true;
+                    confirm.Enabled = false;
+                    detail.Text = L.T("正在启动额度显示器…");
+                    start();
+                }
+            }
+            base.OnFormClosing(e);
+        }
+
+        internal sealed class UpdateTrack : Control
+        {
+            private int percent;
+            internal UpdateTrack()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+            internal int Percent { set { percent = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, Parent == null ? UiTheme.Surface : Parent.BackColor);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                PaintProgress(e.Graphics, ClientRectangle, percent);
+            }
+
+            internal static void PaintProgress(Graphics graphics, Rectangle bounds, int percent)
+            {
+                RectangleF track = RectangleF.Inflate(bounds, -1f, -1f);
+                if (track.Width <= 0 || track.Height <= 0) return;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                if (percent < 100) FillCapsule(graphics, track, UiTheme.Input);
+                if (percent > 0)
+                {
+                    track.Width *= percent / 100f;
+                    FillCapsule(graphics, track, UiTheme.Accent);
+                }
+            }
+
+            private static void FillCapsule(Graphics graphics, RectangleF bounds, Color color)
+            {
+                if (bounds.Width < 1f) return;
+                using (GraphicsPath shape = UiTheme.Round(bounds, bounds.Height / 2f))
+                using (var brush = new LinearGradientBrush(bounds, ControlPaint.Light(color, .14f), color, 90f))
+                    graphics.FillPath(brush, shape);
+            }
+        }
     }
 }
 
@@ -721,6 +1070,7 @@ namespace QuotaTrayApp
         internal static Color Background { get { return Dark ? Color.FromArgb(31, 31, 31) : Color.FromArgb(244, 247, 245); } }
         internal static Color Sidebar { get { return Dark ? Color.FromArgb(38, 38, 38) : Color.FromArgb(230, 237, 232); } }
         internal static Color WarningText { get { return Dark ? Color.FromArgb(252, 154, 158) : Color.FromArgb(161, 35, 52); } }
+        internal static Color UpdateBlue { get { return Dark ? Color.FromArgb(139, 190, 255) : Color.FromArgb(18, 72, 151); } }
         internal static Color Surface { get { return Dark ? Color.FromArgb(47, 47, 47) : Color.White; } }
         internal static Color Input { get { return Dark ? Color.FromArgb(57, 57, 57) : Color.FromArgb(239, 242, 246); } }
         internal static Color TextColor { get { return Dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(14, 19, 26); } }
@@ -829,10 +1179,15 @@ namespace QuotaTrayApp
             catch (EntryPointNotFoundException) { }
             finally { Marshal.FreeHGlobal(ptr); }
         }
+        private static bool IsVersionText(Control control)
+        {
+            return control.Name == "version-label" || control.Name == "update-version-range";
+        }
+
         private static bool IsInSidebar(Control control)
         {
             for (Control c = control; c != null; c = c.Parent)
-                if (c.Name == "sidebar" || c.Name == "version-label") return true;
+                if (c.Name == "sidebar" || IsVersionText(c) || c.Name == "version-update") return true;
             return false;
         }
         private static UiCard FindCardParent(Control control)
@@ -989,7 +1344,7 @@ namespace QuotaTrayApp
             else if (root is Label)
             {
                 ((Label)root).UseCompatibleTextRendering = glass;
-                root.BackColor = glass ? Color.Transparent : (root.Name == "version-label" ? Sidebar : root.Parent == null ? Background : root.Parent.BackColor);
+                root.BackColor = glass ? Color.Transparent : (IsVersionText(root) ? Sidebar : root.Parent == null ? Background : root.Parent.BackColor);
             }
             else if (root.Name == "sidebar" || root.Name == "version-label") root.BackColor = Sidebar;
             else if (root is UiCard) root.BackColor = ((UiCard)root).SurfaceColor;
@@ -1007,7 +1362,9 @@ namespace QuotaTrayApp
                 root.ForeColor = glass ? GlassMuted : Muted;
             if (root.Name == "account-number") root.ForeColor = AccountColor(root.Tag as string);
             if (root.Name == "account-status-warning") root.ForeColor = WarningText;
-            if (root.Name == "version-label") root.ForeColor = Dark ? Color.FromArgb(120, 123, 124) : (glass ? Color.FromArgb(40, 50, 60) : Color.FromArgb(92, 102, 108));
+            if (IsVersionText(root)) root.ForeColor = Dark ? Color.FromArgb(142, 146, 149) : Color.FromArgb(92, 102, 108);
+            if (root.Name == "update-status")
+                root.ForeColor = root.Tag is bool && (bool)root.Tag ? UpdateBlue : (glass ? GlassMuted : Muted);
             foreach (Control child in root.Controls) Apply(child);
             if (root.IsHandleCreated && (root is ScrollableControl))
             {

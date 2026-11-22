@@ -19,7 +19,7 @@ if ($ToastPreview) {
     $previewFlags = @('/define:QUOTA_TOAST_PREVIEW')
 }
 if (-not (Test-Path -LiteralPath $csc)) { throw '找不到.NET Framework 4编译器。' }
-$sourceNames = @('Program.cs','Accounts.cs','MultiAccounts.cs','SettingsForm.cs','QuotaPreferences.cs','ToastSound.cs')
+$sourceNames = @('Program.cs','Accounts.cs','MultiAccounts.cs','SettingsForm.cs','QuotaPreferences.cs','ToastSound.cs','ReleaseUpdates.cs')
 $sources = @($sourceNames | ForEach-Object { Join-Path $dir $_ })
 foreach ($file in $sources) { if (-not (Test-Path -LiteralPath $file)) { throw "缺少源码：$file" } }
 if ($UpdateShortcut) {

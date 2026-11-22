@@ -12,6 +12,8 @@ desktop-icon-*.ico
 account-status.json
 multi-account-status.json
 display-settings.json
+.release-update/
+release-notified.txt
 
 # 打包产物
 *.zip
