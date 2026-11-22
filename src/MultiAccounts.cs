@@ -30,12 +30,16 @@ namespace QuotaTrayApp
     internal sealed class AccountToastEntry
     {
         internal string Slot, Label, Body, Sound, EmailMask;
+        internal bool Compact;
     }
     internal sealed class AccountToastQueue
     {
         private readonly Queue<AccountToastEntry> entries = new Queue<AccountToastEntry>();
         internal void Enqueue(string label, string body, string sound) { Enqueue(null, label, body, sound); }
-        internal void Enqueue(string slot, string label, string body, string sound, string emailMask = null) { entries.Enqueue(new AccountToastEntry { Slot = slot, Label = label, Body = body, Sound = sound, EmailMask = emailMask }); }
+        internal void Enqueue(string slot, string label, string body, string sound, string emailMask = null, bool compact = false)
+        {
+            entries.Enqueue(new AccountToastEntry { Slot = slot, Label = label, Body = body, Sound = sound, EmailMask = emailMask, Compact = compact });
+        }
         internal void Remove(string slot)
         {
             int count = entries.Count;
@@ -83,6 +87,7 @@ namespace QuotaTrayApp
             internal DateTime lastSuccess;
             internal string error = "not_checked";
             internal NotifyIcon icon;
+            internal TrayIconHover hover;
             internal string iconKey;
             internal NotifyWindow tier, fixedWindow;
             internal int level = int.MinValue;
@@ -133,18 +138,18 @@ namespace QuotaTrayApp
         {
             return w != null && !double.IsNaN(w.used) && !double.IsInfinity(w.used) && w.used >= 0 && w.used <= 100 && !double.IsNaN(w.windowMins) && !double.IsInfinity(w.windowMins) && w.windowMins > 0 && !double.IsNaN(w.resetsAt) && !double.IsInfinity(w.resetsAt) && w.resetsAt >= 0 && w.resetsAt <= 253402300799;
         }
-        private static string SafePlan(string value) { return PlanNames.Normalize(value); }
+        private static string SafePlan(string value) { return PlanNames.Store(value); }
         private static string Mask(string value)
         {
             return value != null && value.Length <= 128 && Regex.IsMatch(value, @"^[A-Za-z0-9._%+\-]{0,2}\*{3,}@[A-Za-z0-9.\-]{1,100}$") ? value : "***";
         }
         private static string SafeCode(string value)
         {
-            switch (value) { case "timeout": case "cancelled": case "identity_mismatch": case "not_connected": case "keyring_unavailable": case "busy": case "account_busy": case "store_busy": case "no_quota_data": case "server_error": case "invalid_response": return value; default: return "client_error"; }
+            switch (value) { case "timeout": case "cancelled": case "identity_mismatch": case "not_connected": case "keyring_unavailable": case "busy": case "account_busy": case "store_busy": case "no_quota_data": case "server_error": case "invalid_response": case "node_start_failed": case "codex_launch_failed": case "auth_failed": return value; default: return "client_error"; }
         }
         private static string ErrorText(string code)
         {
-            switch (code) { case "identity_mismatch": return L.T("账号身份变化，已停止读取。"); case "timeout": return L.T("连接超时，请重试。"); case "not_connected": return L.T("请先连接此账号。"); case "keyring_unavailable": return L.T("Windows 凭据库不可用，已停止连接。"); default: return L.T("额度查询失败"); }
+            switch (code) { case "identity_mismatch": return L.T("账号身份变化，已停止读取。"); case "timeout": return L.T("连接超时，请重试。"); case "not_connected": return L.T("请先连接此账号。"); case "keyring_unavailable": return L.T("Windows 凭据库不可用，已停止连接。"); case "auth_failed": return L.T("当前绑定的 Codex 登录不可用，请刷新登录或重新绑定。"); case "node_start_failed": case "codex_launch_failed": return AccountConnectionForm.ConnectionError(code); default: return L.T("额度查询失败"); }
         }
         private static string PlanTitle(string value) { return PlanNames.Title(value); }
         private static int SlotNumber(string slot)
@@ -226,7 +231,13 @@ namespace QuotaTrayApp
                                 catch { bad = true; }
                             }
                         };
-                        lock (processGate) { if (stopped) return new ConnectionReply { code = "cancelled" }; p.Start(); active = p; }
+                        lock (processGate)
+                        {
+                            if (stopped) return new ConnectionReply { code = "cancelled" };
+                            try { p.Start(); }
+                            catch (System.ComponentModel.Win32Exception) { return new ConnectionReply { code = "node_start_failed" }; }
+                            active = p;
+                        }
                         p.BeginOutputReadLine(); p.BeginErrorReadLine();
                         Stopwatch sw = Stopwatch.StartNew(); bool cancelled = false; long cancelAt = 0;
                         while (!p.WaitForExit(200))
@@ -278,6 +289,7 @@ namespace QuotaTrayApp
                 incoming.Add(a.slot, a);
             }
             // Keep the original tray icon available while removing or replacing icons.
+            var before = new HashSet<string>(states.Keys);
             bool replacing = false;
             foreach (KeyValuePair<string, State> pair in states)
                 if (!incoming.ContainsKey(pair.Key) || !incoming[pair.Key].connected || !SameIdentity(pair.Value.account.identity, incoming[pair.Key].identity)) replacing = true;
@@ -312,6 +324,14 @@ namespace QuotaTrayApp
                 string desktop = prefs != null && (prefs.desktopSlot == "auto" || states.ContainsKey(prefs.desktopSlot ?? "")) ? prefs.desktopSlot : "auto";
                 prefs = new DisplayPreferences(chosen.ToArray(), desktop);
             }
+            // 新绑定的账号直接加入托盘显示，不需要重启后再去设置里勾选。
+            if (prefs != null && prefs.traySlots != null && prefs.traySlots.Length < 5)
+            {
+                var shown = new List<string>(prefs.traySlots);
+                foreach (DisplayAccount account in accounts)
+                    if (!before.Contains(account.Slot) && !shown.Contains(account.Slot) && shown.Count < 5) shown.Add(account.Slot);
+                if (shown.Count != prefs.traySlots.Length) prefs = new DisplayPreferences(shown.ToArray(), prefs.desktopSlot);
+            }
             ApplyPreferences();
             lock (gate) refreshAll = true;
             wake.Set();
@@ -336,21 +356,25 @@ namespace QuotaTrayApp
                 Evaluate(s);
             }
             UpdateIcon(s);
-            string chosen = DisplayPolicy.ChooseDesktop(Accounts(), prefs);
-            if (chosen != desktopSource)
-            {
-                desktopSource = chosen;
-                if (chosen != null && states[chosen].reply != null && states[chosen].error == null) host.SyncMultiDesktop(states[chosen].reply);
-            }
-            if (desktopSource == work.slot && s.error == null) host.SyncMultiDesktop(s.reply);
+            SyncDesktop();
             SyncGroup();
             SaveStatus();
+        }
+        private void SyncDesktop()
+        {
+            string previous = desktopSource;
+            desktopSource = DisplayPolicy.ChooseDesktop(Accounts(), prefs);
+            State source;
+            if (desktopSource != null && states.TryGetValue(desktopSource, out source) && source.reply != null)
+                host.SyncMultiDesktop(source.reply);
+            else if (previous != null && previous != desktopSource)
+                host.SyncMultiDesktop(null);
         }
         private void Evaluate(State s)
         {
             int level = settings.LevelFor(s.account.slot);
             if (level < 0) { s.tier = null; s.fixedWindow = null; s.level = level; return; }
-            bool single = s.reply.primary == null || s.reply.primary.windowMins > 1440;
+            bool single = s.reply.primary == null || QuotaWindow.IsLong(s.reply.primary.windowMins);
             if (s.tier == null || s.level != level || s.single != single)
             {
                 s.tier = new NotifyWindow { thresholds = NotifyRules.Tier(level) };
@@ -364,7 +388,10 @@ namespace QuotaTrayApp
         {
             if (w == null) return;
             int t = n.Fire(w.used, w.resetsAt);
-            string window = longWindow ? L.F("{0} 天", (int)Math.Round(w.windowMins / 1440)) : L.T("5 小时");
+            int days = longWindow ? QuotaWindow.Days(w.windowMins) : 0;
+            string window = longWindow ? L.F("{0} 天", days) : L.T("5 小时");
+            if (n.Recovered && NotifyRules.CanShowRecovery(s.account.plan, days))
+                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.RecoveryBody(days), TrayContext.RecoverySound, AccountMask(s), true);
             if (n.Exhausted) host.ShowMultiToast(s.account.slot, LabelFor(s), L.F("{0}额度已耗尽", window), longWindow ? "notify-7d-empty.wav" : "notify-5h-empty.wav", AccountMask(s));
             else if (t > 0) host.ShowMultiToast(s.account.slot, LabelFor(s), L.F("{0}剩余 {1}%", window, Math.Max(0, 100 - (int)Math.Round(w.used))) + "\n" + TrayContext.MultiTooltipCountdown(w.resetsAt), "notify.wav", AccountMask(s));
         }
@@ -381,19 +408,24 @@ namespace QuotaTrayApp
                     ((UiTrayMenu)menu).Track(icon);
                     icon.Icon = TrayContext.MakeMultiIcon(s.reply);
                     icon.Text = ShortText(LabelFor(s));
-                    icon.MouseDown += delegate { selected = captured.account.slot; host.PrepareMultiMenu(selected, LabelFor(captured)); };
+                    s.hover = new TrayIconHover(icon, (UiTrayMenu)menu);
+                    icon.MouseDown += delegate { selected = captured.account.slot; host.HideQuotaTip(); host.PrepareMultiMenu(selected, LabelFor(captured)); };
+                    icon.MouseMove += delegate
+                    {
+                        if (captured.hover.Enabled && !host.ShowQuotaTip(icon, LabelFor(captured), captured.reply, captured.error, captured.lastSuccess))
+                            captured.hover.Disable();
+                    };
                     icon.DoubleClick += delegate { selected = captured.account.slot; RefreshSelected(); };
                     s.icon = icon;
                     s.iconKey = null;
                 }
             }
-            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) >= 0) s.icon.Visible = true;
+            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) >= 0) s.hover.SetVisible(true);
             if (!Managed) { host.SetMultiMode(true); Managed = true; }
-            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) < 0) s.icon.Visible = false;
+            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) < 0) s.hover.SetVisible(false);
             if (selected == null || !states.ContainsKey(selected)) { var sorted = new List<string>(states.Keys); sorted.Sort(StringComparer.Ordinal); selected = sorted[0]; }
-            string source = DisplayPolicy.ChooseDesktop(Accounts(), prefs);
-            if (source != desktopSource) { desktopSource = source; if (source != null && states[source].reply != null && states[source].error == null) host.SyncMultiDesktop(states[source].reply); }
             foreach (State s in states.Values) UpdateIcon(s);
+            SyncDesktop();
             SyncGroup();
             SaveStatus();
         }
@@ -424,11 +456,13 @@ namespace QuotaTrayApp
             string tooltip = BuildNativeTooltip(s.account.slot, s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan),
                 s.account.emailMask ?? (s.account.identity == null ? null : s.account.identity.emailMask), s.reply, s.error, s.lastSuccess);
             if (tooltip != s.icon.Text) s.icon.Text = tooltip;
+            if (s.hover.Enabled && !host.RefreshQuotaTip(s.icon, LabelFor(s), s.reply, s.error, s.lastSuccess))
+                s.hover.Disable();
         }
 
         private static string IconUsage(WindowInfo quota)
         {
-            return quota == null ? "-" : Math.Round(quota.used).ToString();
+            return quota == null ? "-" : QuotaWindow.DisplayUsed(quota.used).ToString();
         }
 
         internal static string BuildTooltip(string slot, string plan, string mask, ConnectionReply reply, string error, DateTime lastSuccess)
@@ -442,8 +476,8 @@ namespace QuotaTrayApp
                 {
                     if (w == null) continue;
                     if (body.Length > 0) body += "\n";
-                    int remain = Math.Max(0, Math.Min(100, 100 - (int)Math.Round(w.used)));
-                    body += (w.windowMins > 1440 ? L.F("{0} 天 剩余 {1}%", (int)Math.Round(w.windowMins / 1440), remain) : L.F("5 小时 剩余 {0}%", remain)) + "｜" + TrayContext.MultiTooltipCountdown(w.resetsAt);
+                    int remain = QuotaWindow.Remaining(w.used);
+                    body += (QuotaWindow.IsLong(w.windowMins) ? L.F("{0} 天 剩余 {1}%", QuotaWindow.Days(w.windowMins), remain) : L.F("5 小时 剩余 {0}%", remain)) + "｜" + TrayContext.MultiTooltipCountdown(w.resetsAt);
                 }
             }
             if (error != null) body += (body.Length == 0 ? "" : "\n") + L.T("更新失败") + "\n" + L.T("最后成功") + " " + (lastSuccess == DateTime.MinValue ? L.T("暂无") : lastSuccess.ToString("MM-dd HH:mm"));
@@ -462,10 +496,10 @@ namespace QuotaTrayApp
                 foreach (WindowInfo w in new WindowInfo[] { reply.primary, reply.secondary })
                 {
                     if (w == null) continue;
-                    int remain = Math.Max(0, Math.Min(100, 100 - (int)Math.Round(w.used)));
-                    bool weekly = w.windowMins > 1440;
-                    string quota = weekly ? L.F("{0} 天 剩余 {1}%", (int)Math.Round(w.windowMins / 1440), remain) : L.F("5 小时 剩余 {0}%", remain);
-                    if (L.Lang == "en") quota = (weekly ? ((int)Math.Round(w.windowMins / 1440)) + "d" : "5h") + " left " + remain + "%";
+                    int remain = QuotaWindow.Remaining(w.used);
+                    bool weekly = QuotaWindow.IsLong(w.windowMins);
+                    string quota = weekly ? L.F("{0} 天 剩余 {1}%", QuotaWindow.Days(w.windowMins), remain) : L.F("5 小时 剩余 {0}%", remain);
+                    if (L.Lang == "en") quota = (weekly ? QuotaWindow.Days(w.windowMins) + "d" : "5h") + " left " + remain + "%";
                     timed += "\n" + quota + "｜" + TrayContext.MultiTooltipCountdown(w.resetsAt).Replace(" ", "");
                 }
                 if (timed.Length > 63 && L.Lang == "zh") timed = timed.Replace("剩余 ", "剩余");
@@ -482,8 +516,8 @@ namespace QuotaTrayApp
                 foreach (WindowInfo w in new WindowInfo[] { reply.primary, reply.secondary })
                 {
                     if (w == null) continue;
-                    int remain = Math.Max(0, Math.Min(100, 100 - (int)Math.Round(w.used)));
-                    compact += "\n" + (w.windowMins > 1440 ? L.F("{0} 天 剩余 {1}%", (int)Math.Round(w.windowMins / 1440), remain) : L.F("5 小时 剩余 {0}%", remain));
+                    int remain = QuotaWindow.Remaining(w.used);
+                    compact += "\n" + (QuotaWindow.IsLong(w.windowMins) ? L.F("{0} 天 剩余 {1}%", QuotaWindow.Days(w.windowMins), remain) : L.F("5 小时 剩余 {0}%", remain));
                 }
             }
             return ShortText(compact);
@@ -498,7 +532,7 @@ namespace QuotaTrayApp
                 {
                     bool visible = groupActive ? prefs != null && Array.IndexOf(prefs.traySlots, s.account.slot) >= 0 : s.icon != null && s.icon.Visible;
                     if (visible) visibleCount++;
-                    list.Add(new { slot = s.account.slot, visible = visible, plan = SafePlan(s.account.plan), primary = s.reply == null ? null : s.reply.primary, secondary = s.reply == null ? null : s.reply.secondary, error = s.error, lastSuccess = s.lastSuccess == DateTime.MinValue ? null : s.lastSuccess.ToUniversalTime().ToString("o"), tooltip = groupActive ? TooltipFor(s) : s.icon == null ? null : s.icon.Text, fullTooltip = TooltipFor(s) });
+                    list.Add(new { slot = s.account.slot, visible = visible, plan = SafePlan(s.account.plan), primary = s.reply == null ? null : s.reply.primary, secondary = s.reply == null ? null : s.reply.secondary, error = s.error, lastSuccess = s.lastSuccess == DateTime.MinValue ? null : s.lastSuccess.ToUniversalTime().ToString("o"), tooltip = TooltipFor(s), fullTooltip = TooltipFor(s) });
                 }
                 File.WriteAllText(Path.Combine(root, "multi-account-status.json"), new JavaScriptSerializer().Serialize(new { desktopSource = desktopSource, desktopPreference = prefs == null ? null : prefs.desktopSlot, visibleIconCount = visibleCount, visibleAccountCount = visibleCount, grouped = false, presentation = "separate-tray", groupError = (string)null, groupWindow = 0, accounts = list }), new UTF8Encoding(false));
             }
@@ -538,7 +572,7 @@ namespace QuotaTrayApp
         internal void CreateDesktopShortcut()
         {
             State s;
-            if (desktopSource != null && states.TryGetValue(desktopSource, out s) && s.reply != null && s.error == null) host.EnsureMultiShortcut(s.reply, LabelFor(s));
+            if (desktopSource != null && states.TryGetValue(desktopSource, out s) && s.reply != null && s.error == null) host.EnsureMultiShortcut(s.reply);
             else ShowBalloon(L.T("额度显示器"), L.T("所选账号暂未取得最新额度。"));
         }
         internal void ApplyLanguage() { foreach (State s in states.Values) UpdateIcon(s); UpdateOverview(); }
@@ -574,6 +608,8 @@ namespace QuotaTrayApp
             prefs = next; ApplyPreferences(); return true;
         }
         internal void RefreshAll() { lock (gate) { refreshAll = true; if (states.Count == 0) listNeeded = true; } wake.Set(); }
+        // 右键“刷新”必须连同绑定列表一起重读，否则新绑定的账号要重启才出现。
+        internal void ReloadAndRefresh() { lock (gate) { listNeeded = true; refreshAll = true; generation++; } wake.Set(); }
         internal void ResetReminder(string slot)
         {
             State s;
@@ -666,9 +702,9 @@ namespace QuotaTrayApp
         private static string QuotaText(WindowInfo w)
         {
             if (w == null) return null;
-            string title = w.windowMins > 1440 ? L.F("{0} 天额度", (int)Math.Round(w.windowMins / 1440)) : L.T("5 小时额度");
+            string title = QuotaWindow.IsLong(w.windowMins) ? L.F("{0} 天额度", QuotaWindow.Days(w.windowMins)) : L.T("5 小时额度");
             string reset = w.resetsAt <= 0 ? L.T("暂无") : new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(w.resetsAt).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
-            return title + " · " + L.F("剩余 {0}%", Math.Max(0, Math.Min(100, (int)Math.Round(100 - w.used)))) + " · " + L.F("恢复：{0}", reset);
+            return title + " · " + L.F("剩余 {0}%", QuotaWindow.Remaining(w.used)) + " · " + L.F("恢复：{0}", reset);
         }
         private void AddLine(TableLayoutPanel card, string text)
         {

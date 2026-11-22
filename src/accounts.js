@@ -13,7 +13,7 @@ const ERRORS = {
   identity_mismatch:'账号身份已改变', identity_unavailable:'无法确认账号身份',
   auth_failed:'账号授权失败', invalid_url:'授权地址不安全', timeout:'操作超时',
   cancelled:'操作已取消', server_error:'账号服务暂不可用', invalid_response:'账号服务返回异常',
-  storage_error:'账号资料无法读写'
+  storage_error:'账号资料无法读写', codex_launch_failed:'Codex 查询程序无法启动'
 };
 class SafeError extends Error { constructor(code) { super(code); this.code = code; } }
 function fail(code) { throw new SafeError(code); }
@@ -216,7 +216,7 @@ class Rpc {
     this.pending = new Map(); this.notices = []; this.next = 1; this.buffer = ''; this.outputBytes = 0; this.closed = false;
     const args = currentSource ? ['-c','model_provider="openai"','app-server','--stdio'] : ['-c','cli_auth_credentials_store="keyring"','-c','model_provider="openai"','app-server','--stdio'];
     this.proc = spawn(exe,args,{cwd:home,env:isolatedEnv(home),stdio:['pipe','pipe','pipe'],windowsHide:true});
-    this.exit = new Promise(resolve => { this.proc.once('exit',() => { this.closed = true; this.stop('server_error'); resolve(); }); this.proc.once('error',() => { this.closed = true; this.stop('server_error'); resolve(); }); });
+    this.exit = new Promise(resolve => { this.proc.once('exit',() => { this.closed = true; this.stop('server_error'); resolve(); }); this.proc.once('error',() => { this.closed = true; this.stop('codex_launch_failed'); resolve(); }); });
     this.proc.stdout.on('data',d => this.data(d));
     this.proc.stderr.on('data',() => {});
     this.proc.stdin.on('error',() => this.stop('server_error'));
@@ -300,7 +300,7 @@ async function run(command,slot,options = {}) {
   const externalAbort = () => abort.abort(new SafeError('cancelled'));
   if (options.signal) { if (options.signal.aborted) externalAbort(); else options.signal.addEventListener('abort',externalAbort,{once:true}); }
   try {
-    if (!['list','login','query','confirm','cancel','discover','bind-current'].includes(command) || (['list','discover'].includes(command) ? slot !== undefined : !SLOTS.includes(slot))) fail('invalid_argument');
+    if (!['list','login','query','confirm','cancel','discover','bind-current','unbind'].includes(command) || (['list','discover'].includes(command) ? slot !== undefined : !SLOTS.includes(slot))) fail('invalid_argument');
     const base = options.root || (process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA,'CodexQuotaTray','accounts'));
     if (!base) fail('missing_environment');
     const root = path.resolve(base);
@@ -330,6 +330,14 @@ async function run(command,slot,options = {}) {
         if (entry.connected) delete entry.candidate; else delete state.accounts[slot];
         saveState(root,state);
       }
+      emit({event:'result',ok:true,slot}); return;
+    }
+    if (command === 'unbind') {
+      // Removes the binding record only; credential files stay untouched so an
+      // accidental unbind never destroys another account's saved sign-in.
+      if (!entry || !entry.connected) fail('not_connected');
+      delete state.accounts[slot];
+      saveState(root,state);
       emit({event:'result',ok:true,slot}); return;
     }
     if (command === 'query' && (!entry || !entry.connected)) fail('not_connected');

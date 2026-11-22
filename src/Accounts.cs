@@ -32,6 +32,11 @@ namespace QuotaTrayApp
                 case "账号读取异常": return Pick(text, "Account check failed", "アカウントの確認に失敗");
                 case "更换账号": return Pick(text, "Change account", "アカウントを変更");
                 case "通过浏览器连接": return Pick(text, "Connect in browser", "ブラウザーで連携");
+                case "通过浏览器绑定": return Pick(text, "Bind in browser", "ブラウザーで連携");
+                case "取消绑定": return Pick(text, "Unbind", "連携を解除");
+                case "取消绑定这个账号？该位置会空出来，之后可以绑定别的账号。": return Pick(text, "Unbind this account? The slot will be freed for another account.", "このアカウントの連携を解除しますか？この位置は空き、別のアカウントを連携できます。");
+                case "已取消绑定。": return Pick(text, "Account unbound.", "連携を解除しました。");
+                case "浏览器授权完成后请返回本窗口核对。推荐使用「通过浏览器绑定」；手动指定 Codex 时，切换或关闭登录可能导致读取失败。": return Pick(text, "Return to this window after the browser sign-in completes. “Bind in browser” is recommended; a manually selected Codex may fail to read after the login switches or closes.", "ブラウザーでの認証が終わったら、このウィンドウに戻って確認してください。「ブラウザーで連携」を推奨します。手動で指定した Codex は、ログインの切り替えや終了後に読み取れない場合があります。");
                 case "浏览器授权": return Pick(text, "Browser sign-in", "ブラウザー認証");
                 case "检查额度": return Pick(text, "Check quota", "利用枠を確認");
                 case "确认绑定": return Pick(text, "Confirm binding", "連携を確定");
@@ -99,7 +104,7 @@ namespace QuotaTrayApp
                 string description = state == AccountSlotState.Bound ? "已绑定" : state == AccountSlotState.Pending ? "待确认" :
                     state == AccountSlotState.Error ? "账号读取异常" : "未绑定";
                 AccessibleDescription = AccountText.T(description);
-                UiTheme.Apply(this);
+                Invalidate();
             }
         }
 
@@ -126,22 +131,24 @@ namespace QuotaTrayApp
         {
             base.OnPaint(e);
             if (state == AccountSlotState.Empty) return;
-            int x = ClientSize.Width - 34, y = 20;
+            float s = UiTheme.DpiScaleOf(this);
+            int iconSize = UiTheme.S(16, s);
+            int x = ClientSize.Width - UiTheme.S(34, s), y = UiTheme.S(20, s);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen pen = new Pen(Indicator, 1.5f))
+            using (Pen pen = new Pen(Indicator, Math.Max(1.3f, 1.5f * s)))
             {
-                e.Graphics.DrawEllipse(pen, x, y, 16, 16);
+                e.Graphics.DrawEllipse(pen, x, y, iconSize, iconSize);
                 if (state == AccountSlotState.Bound)
-                    e.Graphics.DrawLines(pen, new[] { new Point(x + 4, y + 8), new Point(x + 7, y + 11), new Point(x + 12, y + 5) });
+                    e.Graphics.DrawLines(pen, new[] { new Point(x + UiTheme.S(4, s), y + UiTheme.S(8, s)), new Point(x + UiTheme.S(7, s), y + UiTheme.S(11, s)), new Point(x + UiTheme.S(12, s), y + UiTheme.S(5, s)) });
                 else if (state == AccountSlotState.Error)
                 {
-                    e.Graphics.DrawLine(pen, x + 8, y + 4, x + 8, y + 9);
-                    e.Graphics.DrawLine(pen, x + 8, y + 11, x + 8, y + 13);
+                    e.Graphics.DrawLine(pen, x + UiTheme.S(8, s), y + UiTheme.S(4, s), x + UiTheme.S(8, s), y + UiTheme.S(9, s));
+                    e.Graphics.DrawLine(pen, x + UiTheme.S(8, s), y + UiTheme.S(11, s), x + UiTheme.S(8, s), y + UiTheme.S(13, s));
                 }
                 else
                 {
-                    e.Graphics.DrawLine(pen, x + 8, y + 4, x + 8, y + 8);
-                    e.Graphics.DrawLine(pen, x + 8, y + 8, x + 11, y + 9);
+                    e.Graphics.DrawLine(pen, x + UiTheme.S(8, s), y + UiTheme.S(4, s), x + UiTheme.S(8, s), y + UiTheme.S(8, s));
+                    e.Graphics.DrawLine(pen, x + UiTheme.S(8, s), y + UiTheme.S(8, s), x + UiTheme.S(11, s), y + UiTheme.S(9, s));
                 }
             }
         }
@@ -192,14 +199,14 @@ namespace QuotaTrayApp
     internal sealed class AccountConnectionForm : UiWindow
     {
         private static readonly string[] SlotNames = new string[] { "a", "b", "c", "d", "e" };
-        private const int LayoutGap = 14;
-        private const int CardInset = 14;
-        private const int ControlHeight = 38;
-        private const int LabelHeight = 24;
-        private const int CardTitleHeight = 28;
-        private const int GuideLeft = 28;
-        private int fittedHeight;
-        private readonly int slotActionWidth;
+        private int LayoutGap { get { return S(14); } }
+        private int CardInset { get { return S(14); } }
+        private int ControlHeight { get { return S(38); } }
+        private int LabelHeight { get { return S(24); } }
+        private int CardTitleHeight { get { return S(28); } }
+        private int GuideLeft { get { return S(28); } }
+        private int fittedHeight, lastCardsHeight = -1;
+        private bool adjustingLayout;
         private string nodeExe;
         private readonly string script, reportPath;
         private string codexExe;
@@ -214,6 +221,7 @@ namespace QuotaTrayApp
         private readonly Label[] quotaLabels = new Label[5];
         private readonly Button[] connectButtons = new Button[5];
         private readonly Button[] checkButtons = new Button[5];
+        private readonly Button[] unbindButtons = new Button[5];
         internal bool InitialSetup { get; set; }
         private ConnectedIdentity discoveredIdentity;
         private readonly Button[] confirmButtons = new Button[5];
@@ -222,6 +230,7 @@ namespace QuotaTrayApp
         private readonly ConnectionObservation[] observations = new ConnectionObservation[5];
         private readonly bool[] knownBinding = new bool[5], failedBinding = new bool[5];
         private readonly Label status;
+        private readonly Label hint;
         private readonly Button cancelWork;
         private readonly object processGate = new object();
         private Process activeProcess;
@@ -253,26 +262,22 @@ namespace QuotaTrayApp
                 }
             Text = AccountText.T("账号绑定");
             Font = new Font("Microsoft YaHei UI", 10.5f);
-            slotActionWidth = 120;
-            foreach (string label in new[] { "使用 Codex 当前账号", "通过浏览器连接", "更换账号", "检查额度", "确认绑定", "取消" })
-                slotActionWidth = Math.Max(slotActionWidth, ActionWidth(AccountText.T(label), Font));
             MaximizeBox = false;
             MinimizeBox = false;
             ShowIcon = true;
             StartPosition = FormStartPosition.CenterScreen;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(760, 600);
+            ClientSize = new Size(S(760), S(600));
             int availableHeight = Screen.FromPoint(Cursor.Position).WorkingArea.Height;
             if (Height > availableHeight) Height = availableHeight;
-            MinimumSize = new Size(760, Math.Min(500, availableHeight));
-            modeLabel = new Label();
+            MinimumSize = new Size(S(760), Math.Min(S(500), availableHeight));
+            modeLabel = new UiLabel();
             UpdateReadingMode();
-            modeLabel.SetBounds(GuideLeft, CaptionHeight + 12, Math.Max(1, ClientSize.Width - GuideLeft * 2), 30);
+            modeLabel.SetBounds(GuideLeft, ScaledCaptionHeight + S(12), Math.Max(1, ClientSize.Width - GuideLeft * 2), S(30));
             modeLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(modeLabel);
-            accountList = new Panel();
+            accountList = new UiPanel();
             accountList.AutoScroll = true;
-            accountList.SetBounds(16, CaptionHeight + 52, Math.Max(1, ClientSize.Width - 32), ClientSize.Height - CaptionHeight - 216);
+            accountList.SetBounds(S(16), ScaledCaptionHeight + S(52), Math.Max(1, ClientSize.Width - S(32)), ClientSize.Height - ScaledCaptionHeight - S(216));
             accountList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(accountList);
             for (int i = 0; i < SlotNames.Length; i++)
@@ -283,23 +288,26 @@ namespace QuotaTrayApp
                 observations[i] = new ConnectionObservation { slot = slot, code = "not_connected" };
                 GroupBox box = new AccountSlotCard();
                 box.Text = AccountText.F("账号 {0}", (i + 1).ToString());
-                box.SetBounds(12, i * (ControlHeight + LayoutGap), Math.Max(1, accountList.ClientSize.Width - 24), ControlHeight);
+                box.SetBounds(S(12), i * (ControlHeight + LayoutGap), Math.Max(1, accountList.ClientSize.Width - S(24)), ControlHeight);
                 box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
                 accountList.Controls.Add(box);
-                Label who = new Label();
+                Label who = new UiLabel();
                 who.AutoEllipsis = true;
                 who.SetBounds(CardInset, CardInset + CardTitleHeight, Math.Max(1, box.ClientSize.Width - CardInset * 2), LabelHeight);
                 box.Controls.Add(who);
                 identityLabels[i] = who;
-                Label quota = new Label();
+                Label quota = new UiLabel();
                 quota.SetBounds(CardInset, CardInset + CardTitleHeight + LabelHeight + LayoutGap, Math.Max(1, box.ClientSize.Width - CardInset * 2), LabelHeight);
                 quota.Visible = false;
                 box.Controls.Add(quota);
                 quotaLabels[i] = quota;
                 currentButtons[i] = AddButton(box, AccountText.T("使用 Codex 当前账号"), CardInset, delegate { Run("bind-current", index); });
                 ((UiButton)currentButtons[i]).Accent = true;
-                connectButtons[i] = AddButton(box, AccountText.T("通过浏览器连接"), CardInset, delegate { Run("login", index); });
+                connectButtons[i] = AddButton(box, AccountText.T("通过浏览器绑定"), CardInset, delegate { Run("login", index); });
                 checkButtons[i] = AddButton(box, AccountText.T("检查额度"), CardInset, delegate { Run("query", index); });
+                unbindButtons[i] = AddButton(box, AccountText.T("取消绑定"), CardInset, delegate { ConfirmUnbind(index); });
+                ((UiButton)unbindButtons[i]).Danger = true;
+                unbindButtons[i].SetBounds(CardInset, 0, 1, ControlHeight);
                 confirmButtons[i] = AddButton(box, AccountText.T("确认绑定"), CardInset, delegate { Run("confirm", index); });
                 cancelButtons[i] = AddButton(box, AccountText.T("取消"), CardInset, delegate { Run("cancel", index); });
                 connectButtons[i].SetBounds(CardInset, 0, 1, ControlHeight); ((UiButton)connectButtons[i]).Accent = false;
@@ -321,10 +329,17 @@ namespace QuotaTrayApp
             discoverButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             discoverButton.Click += delegate { if (!busy) Run("discover", -1); };
             Controls.Add(discoverButton);
-            status = new Label();
+            status = new UiLabel();
             status.SetBounds(GuideLeft, 0, 1, 1);
             status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(status);
+            hint = new UiLabel();
+            hint.UseMnemonic = false;
+            hint.ForeColor = UiTheme.Muted;
+            hint.Text = AccountText.T("浏览器授权完成后请返回本窗口核对。推荐使用「通过浏览器绑定」；手动指定 Codex 时，切换或关闭登录可能导致读取失败。");
+            hint.SetBounds(GuideLeft, 0, 1, 1);
+            hint.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(hint);
             cancelWork = new UiButton();
             cancelWork.Text = AccountText.T("取消操作");
             cancelWork.SetBounds(GuideLeft, 0, 1, ControlHeight);
@@ -332,13 +347,14 @@ namespace QuotaTrayApp
             ((UiButton)cancelWork).Danger = true;
             cancelWork.Click += delegate { RequestCancellation(); };
             Controls.Add(cancelWork);
-            SizeChanged += delegate { QueueLayout(); };
-            Shown += delegate {
+            SizeChanged += delegate { if (!adjustingLayout) QueueLayout(); };
+            Load += delegate {
                 ActiveControl = locateButton;
                 accountList.AutoScrollPosition = Point.Empty;
-                // Creation can change the native client size before the first layout.
                 fittedHeight = 0;
                 UpdateButtons();
+            };
+            Shown += delegate {
                 if (HasBindingStore()) BeginInvoke((MethodInvoker)delegate { Run("list", -1); });
             };
             FormClosing += delegate(object sender, FormClosingEventArgs e)
@@ -363,6 +379,15 @@ namespace QuotaTrayApp
             return b;
         }
 
+        private void ConfirmUnbind(int index)
+        {
+            if (busy || index < 0 || index >= slots.Length || slots[index] == null || !slots[index].connected) return;
+            string message = AccountText.T("取消绑定这个账号？该位置会空出来，之后可以绑定别的账号。");
+            if (MessageBox.Show(this, message, Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+            Run("unbind", index);
+        }
+
         private void QueueLayout()
         {
             if (arrangingAccounts || layoutQueued || !IsHandleCreated) return;
@@ -383,12 +408,30 @@ namespace QuotaTrayApp
             finally { arrangingAccounts = false; }
         }
 
+        private static void SetBoundsIfChanged(Control control, int x, int y, int width, int height)
+        {
+            if (control.Left != x || control.Top != y || control.Width != width || control.Height != height)
+                control.SetBounds(x, y, width, height);
+        }
+        private static void SetTextIfChanged(Control control, string text)
+        {
+            if (control.Text != text) control.Text = text;
+        }
+        private static void SetVisibleIfChanged(Control control, bool visible)
+        {
+            if (control.Visible != visible) control.Visible = visible;
+        }
         private void ArrangeAccounts()
         {
-            Point scroll = accountList.AutoScrollPosition;
-            accountList.AutoScrollPosition = Point.Empty;
+            adjustingLayout = true;
+            SuspendLayout();
+            accountList.SuspendLayout();
+            try
+            {
+            int scrollY = accountList.AutoScrollPosition.Y;
             int y = 0;
             int currentSlot = CurrentAccountTarget();
+            int cardGap = S(4), cardTail = S(8);
             for (int i = 0; i < SlotNames.Length; i++)
             {
                 ConnectedSlot slot = slots[i];
@@ -402,23 +445,30 @@ namespace QuotaTrayApp
                     failedBinding[i] || (!slot.connected && knownBinding[i]) ? AccountSlotState.Error :
                     slot.connected ? AccountSlotState.Bound : AccountSlotState.Empty;
 
-                identityLabels[i].Visible = hasIdentity;
-                quotaLabels[i].Top = CardInset + CardTitleHeight + (hasIdentity ? LabelHeight : 0) + 4;
-                quotaLabels[i].Visible = hasQuota;
-                int buttonY = CardInset + CardTitleHeight + (hasIdentity ? LabelHeight : 0) + (hasQuota ? LabelHeight + 4 : 0) + 8;
-                card.Location = new Point(12, y);
-                card.Height = buttonY + ControlHeight + CardInset;
-                y += card.Height + LayoutGap;
+                SetVisibleIfChanged(identityLabels[i], hasIdentity);
+                int quotaTop = CardInset + CardTitleHeight + (hasIdentity ? LabelHeight : 0) + cardGap;
+                if (quotaLabels[i].Top != quotaTop) quotaLabels[i].Top = quotaTop;
+                SetVisibleIfChanged(quotaLabels[i], hasQuota);
+                int buttonY = CardInset + CardTitleHeight + (hasIdentity ? LabelHeight : 0) + (hasQuota ? LabelHeight + cardGap : 0) + cardTail;
+                int cardH = (card.State == AccountSlotState.Empty && !showCurrent)
+                    ? (CardInset * 2 + ControlHeight)
+                    : (buttonY + ControlHeight + CardInset);
+                if (card.State == AccountSlotState.Empty && !showCurrent) buttonY = CardInset;
+                SetBoundsIfChanged(card, CardInset, scrollY + y, card.Width, cardH);
+                y += cardH + LayoutGap;
 
-                connectButtons[i].Text = AccountText.T(slot.connected ? "更换账号" : "通过浏览器连接");
+                SetTextIfChanged(connectButtons[i], AccountText.T(slot.connected ? "更换账号" : "通过浏览器绑定"));
                 bool available = !busy || backgroundBusy;
-                currentButtons[i].Visible = showCurrent;
+                SetVisibleIfChanged(currentButtons[i], showCurrent);
                 currentButtons[i].Enabled = showCurrent && !busy;
-                connectButtons[i].Visible = !pending;
+                SetVisibleIfChanged(connectButtons[i], !pending);
                 connectButtons[i].Enabled = available && !pending;
-                checkButtons[i].Visible = slot.connected && !pending;
+                SetVisibleIfChanged(checkButtons[i], slot.connected && !pending);
                 checkButtons[i].Enabled = available && slot.connected && !pending;
-                confirmButtons[i].Visible = cancelButtons[i].Visible = pending;
+                SetVisibleIfChanged(unbindButtons[i], slot.connected && !pending);
+                unbindButtons[i].Enabled = available && slot.connected && !pending;
+                SetVisibleIfChanged(confirmButtons[i], pending);
+                SetVisibleIfChanged(cancelButtons[i], pending);
                 confirmButtons[i].Enabled = cancelButtons[i].Enabled = !busy && pending;
 
                 int left = CardInset;
@@ -431,37 +481,58 @@ namespace QuotaTrayApp
                 else
                 {
                     if (slot.connected) left = PlaceAction(checkButtons[i], left, buttonY);
-                    if (card.State == AccountSlotState.Empty && !showCurrent)
-                    {
-                        card.Height = CardInset * 2 + ControlHeight;
-                        y = card.Bottom + LayoutGap;
-                        buttonY = CardInset;
-                    }
-                    PlaceAction(connectButtons[i], left, buttonY);
+                    left = PlaceAction(connectButtons[i], left, buttonY);
+                    // 取消绑定单独靠右，和左侧“检查额度／更换账号”分开。
+                    if (slot.connected) RightAlignAction(unbindButtons[i], card, buttonY);
                 }
             }
-            cancelWork.Visible = busy && !backgroundBusy;
+            SetVisibleIfChanged(cancelWork, busy && !backgroundBusy);
             cancelWork.Enabled = !cancellationRequested;
             discoverButton.Enabled = !busy;
             locateButton.Enabled = !busy || backgroundBusy;
             LayoutFooter(y - LayoutGap);
+            // 卡片左右各留 CardInset；出现竖向滚动条时把滚动条宽度扣掉，
+            // 否则右侧会被滚动条吞掉一截，看起来左右不等宽。
+            int scrollbar = accountList.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
+            int listWidth = Math.Max(1, accountList.ClientSize.Width - 2 * CardInset - scrollbar);
             for (int i = 0; i < SlotNames.Length; i++)
             {
                 AccountSlotCard card = (AccountSlotCard)connectButtons[i].Parent;
-                card.Width = Math.Max(1, accountList.ClientSize.Width - 24);
+                SetBoundsIfChanged(card, CardInset, card.Top, listWidth, card.Height);
                 int labelWidth = Math.Max(1, card.ClientSize.Width - 2 * CardInset);
-                identityLabels[i].SetBounds(CardInset, CardInset + CardTitleHeight, labelWidth, LabelHeight);
-                quotaLabels[i].SetBounds(CardInset, quotaLabels[i].Top, labelWidth, LabelHeight);
+                SetBoundsIfChanged(identityLabels[i], CardInset, CardInset + CardTitleHeight, labelWidth, LabelHeight);
+                SetBoundsIfChanged(quotaLabels[i], CardInset, quotaLabels[i].Top, labelWidth, LabelHeight);
                 if (card.State == AccountSlotState.Empty && i != currentSlot)
-                    connectButtons[i].Left = card.ClientSize.Width - CardInset - slotActionWidth;
+                {
+                    int emptyLeft = card.ClientSize.Width - CardInset - ActionWidth(connectButtons[i].Text, connectButtons[i].Font, UiScale);
+                    if (connectButtons[i].Left != emptyLeft) connectButtons[i].Left = emptyLeft;
+                }
+                // 用状态判断而不是 Visible：窗口尚未显示时 Visible 恒为 false，
+                // 会漏掉这次真正对齐的机会。
+                if (slots[i].connected && !slots[i].pending) RightAlignAction(unbindButtons[i], card, unbindButtons[i].Top);
             }
-            accountList.AutoScrollPosition = new Point(-scroll.X, -scroll.Y);
+            }
+            finally
+            {
+                accountList.ResumeLayout(false);
+                ResumeLayout(false);
+                adjustingLayout = false;
+            }
         }
 
         private int PlaceAction(Button button, int left, int top)
         {
-            button.SetBounds(left, top, slotActionWidth, ControlHeight);
-            return left + slotActionWidth + LayoutGap;
+            // Content width, matching the 1.8.19 layout rule. A shared maximum width
+            // overflowed the card once a fourth action (取消绑定) joined the row.
+            int width = ActionWidth(button.Text, button.Font, UiScale);
+            SetBoundsIfChanged(button, left, top, width, ControlHeight);
+            return left + width + LayoutGap;
+        }
+
+        private void RightAlignAction(Button button, Control card, int top)
+        {
+            int width = ActionWidth(button.Text, button.Font, UiScale);
+            SetBoundsIfChanged(button, Math.Max(CardInset, card.ClientSize.Width - CardInset - width), top, width, ControlHeight);
         }
 
         private int CurrentAccountTarget()
@@ -481,41 +552,49 @@ namespace QuotaTrayApp
 
         private void LayoutFooter(int cardsHeight)
         {
-            const int listTop = CaptionHeight + 52;
+            int listTop = ScaledCaptionHeight + S(52);
             int rowWidth = Math.Max(1, ClientSize.Width - 2 * GuideLeft);
-            status.Visible = !String.IsNullOrWhiteSpace(status.Text);
+            SetVisibleIfChanged(status, !String.IsNullOrWhiteSpace(status.Text));
             int statusHeight = String.IsNullOrWhiteSpace(status.Text) ? 0 :
                 TextRenderer.MeasureText(status.Text, status.Font, new Size(rowWidth, Int32.MaxValue),
                     TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
-            int footerHeight = ControlHeight + LayoutGap + (statusHeight == 0 ? 0 : LayoutGap + statusHeight);
-            if (fittedHeight == 0 || fittedHeight == ClientSize.Height)
+            int hintHeight = TextRenderer.MeasureText(hint.Text, hint.Font, new Size(rowWidth, Int32.MaxValue),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+            // 底部留出与左右一致的边距：提示文字不再贴着窗口下沿。
+            int footerHeight = ControlHeight + LayoutGap + (statusHeight == 0 ? 0 : LayoutGap + statusHeight) + LayoutGap + hintHeight + GuideLeft;
+            if ((!Visible || !busy || cardsHeight != lastCardsHeight) && (fittedHeight == 0 || fittedHeight == ClientSize.Height))
             {
                 Rectangle work = (IsHandleCreated ? Screen.FromHandle(Handle) : Screen.FromPoint(Cursor.Position)).WorkingArea;
                 int desired = listTop + cardsHeight + LayoutGap + footerHeight;
                 int targetHeight = Math.Min(work.Height, Math.Max(MinimumSize.Height, desired));
                 if (ClientSize.Height != targetHeight)
                 {
-                    ClientSize = new Size(ClientSize.Width, targetHeight);
+                    // UiWindow handles WM_NCCALCSIZE itself, so the live window is all client area.
+                    // Form.ClientSize's setter still adds the standard resize frame to both dimensions.
+                    if (IsHandleCreated) Height = targetHeight;
+                    else ClientSize = new Size(ClientSize.Width, targetHeight);
                     if (Visible && Bottom > work.Bottom) Top = Math.Max(work.Top, work.Bottom - Height);
                 }
                 fittedHeight = ClientSize.Height;
+                lastCardsHeight = cardsHeight;
             }
 
             int firstY = ClientSize.Height - footerHeight;
-            int width = Math.Max(ActionWidth(locateButton.Text, locateButton.Font),
-                Math.Max(ActionWidth(discoverButton.Text, discoverButton.Font), ActionWidth(cancelWork.Text, cancelWork.Font)));
-            locateButton.SetBounds(GuideLeft, firstY, width, ControlHeight);
-            discoverButton.SetBounds(GuideLeft + width + LayoutGap, firstY, width, ControlHeight);
-            cancelWork.SetBounds(GuideLeft + 2 * (width + LayoutGap), firstY, width, ControlHeight);
-            status.SetBounds(GuideLeft, firstY + ControlHeight + LayoutGap, rowWidth, statusHeight);
-            modeLabel.SetBounds(GuideLeft, CaptionHeight + 12, rowWidth, 30);
-            accountList.SetBounds(16, listTop, Math.Max(1, ClientSize.Width - 32), Math.Max(80, firstY - LayoutGap - listTop));
+            int width = Math.Max(ActionWidth(locateButton.Text, locateButton.Font, UiScale),
+                Math.Max(ActionWidth(discoverButton.Text, discoverButton.Font, UiScale), ActionWidth(cancelWork.Text, cancelWork.Font, UiScale)));
+            SetBoundsIfChanged(locateButton, GuideLeft, firstY, width, ControlHeight);
+            SetBoundsIfChanged(discoverButton, GuideLeft + width + LayoutGap, firstY, width, ControlHeight);
+            SetBoundsIfChanged(cancelWork, GuideLeft + 2 * (width + LayoutGap), firstY, width, ControlHeight);
+            SetBoundsIfChanged(status, GuideLeft, firstY + ControlHeight + LayoutGap, rowWidth, statusHeight);
+            SetBoundsIfChanged(hint, GuideLeft, status.Bottom + LayoutGap, rowWidth, hintHeight);
+            SetBoundsIfChanged(modeLabel, GuideLeft, ScaledCaptionHeight + S(12), rowWidth, S(30));
+            SetBoundsIfChanged(accountList, S(16), listTop, Math.Max(1, ClientSize.Width - S(32)), Math.Max(S(80), firstY - LayoutGap - listTop));
         }
 
-        private static int ActionWidth(string label, Font font)
+        private static int ActionWidth(string label, Font font, float scale = 1f)
         {
             int text = TextRenderer.MeasureText(label, font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
-            return Math.Max(120, text + 24);
+            return Math.Max(UiTheme.S(120, scale), text + UiTheme.S(24, scale));
         }
 
         internal void SetCodexPath(string path, string node)
@@ -589,7 +668,7 @@ namespace QuotaTrayApp
         private void Run(string command, int index)
         {
             if (busy) return;
-            if (command != "list" && (String.IsNullOrEmpty(codexExe) || !File.Exists(codexExe)))
+            if (command != "list" && command != "unbind" && (String.IsNullOrEmpty(codexExe) || !File.Exists(codexExe)))
             {
                 status.Text = ConnectionError("missing_environment");
                 UpdateButtons();
@@ -598,7 +677,8 @@ namespace QuotaTrayApp
             busy = true;
             backgroundBusy = command == "list" || command == "discover";
             cancellationRequested = false;
-            status.Text = AccountText.T(command == "login" ? "请在官方网页完成登录，然后回到这里核对账号。" : "正在检查…");
+            if (command != "list")
+                SetTextIfChanged(status, AccountText.T(command == "login" ? "请在官方网页完成登录，然后回到这里核对账号。" : "正在检查…"));
             UpdateButtons();
             string slot = index < 0 ? "" : SlotNames[index];
             ConnectedIdentity expected = index < 0 ? null :
@@ -644,9 +724,11 @@ namespace QuotaTrayApp
                             }
                             SaveObservations();
                         }
-                        status.Text = command == "discover" || command == "bind-current"
-                            ? (result != null && result.code == "missing_environment" ? ConnectionError("missing_environment") : AccountText.T("未识别到可绑定账号。请选择 Codex 查询程序，或点击浏览器授权。"))
-                            : ConnectionError(result == null ? "client_error" : result.code);
+                        string failure = result == null ? "client_error" : result.code;
+                        status.Text = (command == "discover" || command == "bind-current") &&
+                            (failure == "identity_unavailable" || failure == "auth_failed")
+                            ? AccountText.T("未识别到可绑定账号。请选择 Codex 查询程序，或点击浏览器授权。")
+                            : ConnectionError(failure);
                         if (command == "discover") { discoveredIdentity = null; UpdateReadingMode(); }
                         if (command == "list")
                         {
@@ -701,6 +783,24 @@ namespace QuotaTrayApp
                         Run("list", -1); // Reload the preserved binding instead of clearing it locally.
                         return;
                     }
+                    else if (command == "unbind")
+                    {
+                        slots[index].connected = false;
+                        slots[index].pending = false;
+                        slots[index].identity = null;
+                        slots[index].source = null;
+                        slots[index].candidateIdentity = null;
+                        slots[index].candidateSource = null;
+                        knownBinding[index] = false;
+                        failedBinding[index] = false;
+                        identityLabels[index].Text = "";
+                        quotaLabels[index].Text = "";
+                        observations[index] = new ConnectionObservation { slot = SlotNames[index], code = "not_connected" };
+                        status.Text = AccountText.T("已取消绑定。");
+                        if (BindingChanged != null) BindingChanged(this, EventArgs.Empty);
+                        Run("list", -1);
+                        return;
+                    }
                     else if (command == "query")
                     {
                         SetIdentity(index, result.identity, false);
@@ -720,13 +820,18 @@ namespace QuotaTrayApp
 
         private void ApplyList(ConnectedSlot[] accounts)
         {
+            adjustingLayout = true;
+            SuspendLayout();
+            accountList.SuspendLayout();
+            try
+            {
             for (int i = 0; i < SlotNames.Length; i++)
             {
                 string slot = SlotNames[i];
                 slots[i] = new ConnectedSlot { slot = slot };
                 observations[i] = new ConnectionObservation { slot = slot, code = "not_checked" };
-                identityLabels[i].Text = "";
-                quotaLabels[i].Text = "";
+                SetTextIfChanged(identityLabels[i], "");
+                SetTextIfChanged(quotaLabels[i], "");
             }
             if (accounts != null)
                 foreach (ConnectedSlot item in accounts)
@@ -748,8 +853,15 @@ namespace QuotaTrayApp
             UpdateReadingMode();
             ActiveControl = locateButton;
             accountList.AutoScrollPosition = Point.Empty;
-            status.Text = "";
+            SetTextIfChanged(status, "");
             SaveObservations();
+            }
+            finally
+            {
+                accountList.ResumeLayout(false);
+                ResumeLayout(false);
+                adjustingLayout = false;
+            }
         }
 
         private void SetIdentity(int index, ConnectedIdentity identity, bool pending)
@@ -773,7 +885,7 @@ namespace QuotaTrayApp
 
         private static string SafePlan(string value)
         {
-            return PlanNames.Normalize(value);
+            return PlanNames.Store(value);
         }
 
         private static string SafeCode(string value)
@@ -785,16 +897,20 @@ namespace QuotaTrayApp
                 case "invalid_argument": case "missing_environment": case "unsafe_path": case "already_connected":
                 case "no_candidate": case "identity_unavailable": case "auth_failed": case "invalid_url":
                 case "server_error": case "invalid_response": case "storage_error": case "no_quota_data":
+                case "node_start_failed": case "codex_launch_failed":
                     return value;
                 default: return "client_error";
             }
         }
 
-        private static string ConnectionError(string code)
+        internal static string ConnectionError(string code)
         {
             switch (code)
             {
                 case "missing_environment": return AccountText.T("请先选择 Codex 查询程序，再识别当前登录或使用浏览器授权。");
+                case "node_start_failed": return L.T("连接运行时无法启动。请重新选择 Codex 查询程序，或安装 Node.js 后重试。");
+                case "codex_launch_failed": return L.T("无法启动所选的 Codex 查询程序，请重新选择。");
+                case "server_error": return L.T("Codex 查询服务启动或握手失败。请检查 Codex 是否能正常运行。");
                 case "cancelled": return AccountText.T("操作已取消。");
                 case "timeout": return AccountText.T("连接超时，请重试。");
                 case "identity_mismatch": return AccountText.T("账号身份变化，已停止读取。");
@@ -819,7 +935,7 @@ namespace QuotaTrayApp
             foreach (WindowInfo w in new WindowInfo[] { primary, secondary })
             {
                 if (w == null || w.used < 0 || w.used > 100 || w.windowMins <= 0) continue;
-                string window = w.windowMins > 1440 ? AccountText.F("{0} 天", (int)Math.Round(w.windowMins / 1440)) : AccountText.F("{0} 小时", Math.Round(w.windowMins / 60, 1));
+                string window = QuotaWindow.IsLong(w.windowMins) ? AccountText.F("{0} 天", QuotaWindow.Days(w.windowMins)) : AccountText.F("{0} 小时", Math.Round(w.windowMins / 60, 1));
                 if (text.Length > 0) text += "   ";
                 text += AccountText.F("{0}剩余 {1}%", window, 100 - (int)Math.Round(w.used));
             }
@@ -849,7 +965,7 @@ namespace QuotaTrayApp
             try
             {
                 // Listing is local metadata only; missing Codex must not hide the five slots.
-                if (command != "list" && (string.IsNullOrEmpty(codexExe) || !File.Exists(codexExe)))
+                if (command != "list" && command != "unbind" && (string.IsNullOrEmpty(codexExe) || !File.Exists(codexExe)))
                     return Failure("missing_environment");
                 var psi = new ProcessStartInfo(nodeExe, "\"" + script + "\" " + command + (slot.Length == 0 ? "" : " " + slot));
                 psi.UseShellExecute = false;
@@ -916,7 +1032,9 @@ namespace QuotaTrayApp
                     lock (processGate)
                     {
                         if (exiting || cancellationRequested) return Failure("cancelled");
-                        p.Start();
+                        try { p.Start(); }
+                        catch (System.ComponentModel.Win32Exception) { return Failure("node_start_failed"); }
+                        catch (InvalidOperationException) { return Failure("node_start_failed"); }
                         activeProcess = p;
                     }
                     p.BeginOutputReadLine();

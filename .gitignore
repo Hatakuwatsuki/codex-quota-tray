@@ -1,13 +1,17 @@
 # 编译产物
 *.exe
 *.pdb
+/build/
 
-# 运行时数据
+# 运行时数据（程序写在 exe 同目录，不入库）
 settings.txt
 last.json
 tray.log
 *.log
 desktop-icon-*.ico
+account-status.json
+multi-account-status.json
+display-settings.json
 
 # 打包产物
 *.zip

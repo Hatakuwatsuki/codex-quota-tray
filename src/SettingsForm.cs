@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Linq;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -51,15 +53,12 @@ namespace QuotaTrayApp
         private static readonly string[] Appearances = { "跟随系统", "浅色", "深色" };
         // Settings layout uses one baseline gap for ordinary controls.  Small
         // explanatory captions may opt into a tighter margin explicitly.
-        private const int LayoutGap = 10;
-        private const int CardInset = 12;
-        private const int ControlHeight = 33;
-        private const int ShortSelectWidth = 184;
-        private const int LongSelectWidth = 252;
-        private const int IconSlot = 16;
-        private const int IconLeft = 12;
-        private const int TextLeft = 34;
-        private const int CardPaddingSize = CardInset;
+        private int LayoutGap { get { return S(10); } }
+        private int CardInset { get { return S(12); } }
+        private int ControlHeight { get { return S(33); } }
+        private int ShortSelectWidth { get { return S(184); } }
+        private int LongSelectWidth { get { return S(252); } }
+        private int CardPaddingSize { get { return CardInset; } }
         private static readonly string[] LevelTips = {
             "关闭额度提醒。",
             "5小时：剩25%、10%提醒；7天：剩15%、5%提醒。",
@@ -146,17 +145,16 @@ namespace QuotaTrayApp
             Text = "额度显示器设置";
             TitlePrimary = "额度显示器"; TitleSecondary = "设置";
             ShowIcon = true;
-            AutoScaleMode = AutoScaleMode.Dpi;
             Size area = Screen.FromPoint(Cursor.Position).WorkingArea.Size;
-            Size = new Size(Math.Min(800, area.Width), Math.Min(520, area.Height));
-            MinimumSize = new Size(Math.Min(680, area.Width), Math.Min(430, area.Height));
+            Size = new Size(Math.Min(S(800), area.Width), Math.Min(S(520), area.Height));
+            MinimumSize = new Size(Math.Min(S(680), area.Width), Math.Min(S(430), area.Height));
             Font = new Font("Microsoft YaHei UI", 10.5f);
             StartPosition = FormStartPosition.CenterScreen;
-            sidebar = new FlowLayoutPanel();
+            sidebar = new UiFlowPanel();
             sidebar.Name = "sidebar";
             sidebar.Dock = DockStyle.Left;
-            sidebar.Width = 152;
-            sidebar.Padding = new Padding(10, 8, 10, 8);
+            sidebar.Width = S(152);
+            sidebar.Padding = new Padding(S(10), S(8), S(10), S(8));
             sidebar.FlowDirection = FlowDirection.TopDown;
             sidebar.WrapContents = false;
             for (int i = 0; i < Pages.Length; i++)
@@ -166,22 +164,22 @@ namespace QuotaTrayApp
                 nav.Name = "nav-" + target;
                 nav.Appearance = Appearance.Button;
                 nav.TextAlign = ContentAlignment.MiddleLeft;
-                nav.Size = new Size(132, 36);
-                nav.Margin = new Padding(0, 0, 0, 4);
+                nav.Size = new Size(S(132), S(36));
+                nav.Margin = new Padding(0, 0, 0, S(4));
                 nav.CheckedChanged += delegate { if (!updatingNavigation && nav.Checked) Navigate(target); };
                 navigation[i] = nav;
                 sidebar.Controls.Add(nav);
             }
-            content = new FlowLayoutPanel();
+            content = new UiFlowPanel();
             content.Name = "content";
             content.Dock = DockStyle.Fill;
             content.FlowDirection = FlowDirection.TopDown;
             content.WrapContents = false;
             content.AutoScroll = true;
-            content.Padding = new Padding(18, 15, 18, 14);
+            content.Padding = new Padding(S(18), S(15), S(18), S(14));
             Controls.Add(content);
             Controls.Add(sidebar);
-            versionLabel = new Label();
+            versionLabel = new UiLabel();
             versionLabel.Name = "version-label";
             versionLabel.AutoSize = true;
             versionLabel.Text = VersionCaption();
@@ -189,7 +187,7 @@ namespace QuotaTrayApp
             versionLabel.Font = versionFont;
             versionLabel.Disposed += delegate { versionFont.Dispose(); };
             versionLabel.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
-            versionLabel.Location = new Point(18, Math.Max(0, ClientSize.Height - versionLabel.PreferredHeight - 11));
+            versionLabel.Location = new Point(S(18), Math.Max(0, ClientSize.Height - versionLabel.PreferredHeight - S(11)));
             Controls.Add(versionLabel);
             versionLabel.BringToFront();
             content.SizeChanged += delegate
@@ -205,6 +203,7 @@ namespace QuotaTrayApp
                 });
             };
             Navigate(page);
+            Shown += delegate { ResizeCards(); };
             UiTheme.Hook(this);
             themeTimer.Interval = 2000;
             themeTimer.Tick += delegate { UiTheme.RefreshSystem(); };
@@ -300,14 +299,14 @@ namespace QuotaTrayApp
             GroupBox card = new UiCard { AccountSlot = slot }; card.AutoSize = false;
             card.Padding = new Padding(CardPaddingSize);
             card.Margin = new Padding(0, 0, 0, LayoutGap);
-            FlowLayoutPanel inner = new FlowLayoutPanel(); inner.Name = "inner"; inner.AutoSize = false; inner.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            FlowLayoutPanel inner = new UiFlowPanel(); inner.Name = "inner"; inner.AutoSize = false; inner.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             inner.FlowDirection = FlowDirection.TopDown;
             inner.WrapContents = false; inner.Location = new Point(CardPaddingSize, CardPaddingSize); card.Controls.Add(inner); content.Controls.Add(card);
             return card;
         }
         private FlowLayoutPanel ActionRow()
         {
-            FlowLayoutPanel row = new FlowLayoutPanel(); row.Name = "action-row"; row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            FlowLayoutPanel row = new UiFlowPanel(); row.Name = "action-row"; row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             row.FlowDirection = FlowDirection.LeftToRight; row.WrapContents = true; row.Margin = new Padding(0); return row;
         }
         private FlowLayoutPanel Inner(GroupBox card) { return (FlowLayoutPanel)card.Controls["inner"]; }
@@ -319,17 +318,17 @@ namespace QuotaTrayApp
             try
             {
                 // The client area already excludes the visible scrollbar.
-                int width = Math.Max(250, content.ClientSize.Width - content.Padding.Horizontal);
+                int width = Math.Max(S(250), content.ClientSize.Width - content.Padding.Horizontal);
                 foreach (Control c in content.Controls)
                 {
                     GroupBox card = c as GroupBox;
                     if (card == null) { c.MaximumSize = new Size(width, 0); continue; }
                     FlowLayoutPanel inner = Inner(card);
-                    int innerWidth = Math.Max(100, width - card.Padding.Horizontal);
+                    int innerWidth = Math.Max(S(100), width - card.Padding.Horizontal);
                     foreach (Control child in inner.Controls)
                     {
                         Label label = child as Label;
-                        if (label != null) label.MaximumSize = new Size(innerWidth - 8, 0);
+                        if (label != null) label.MaximumSize = new Size(innerWidth - S(8), 0);
                         FlowLayoutPanel row = child as FlowLayoutPanel;
                         if (row != null)
                         {
@@ -357,11 +356,13 @@ namespace QuotaTrayApp
                             }
                             if (row.Name == "account-header") row.MaximumSize = new Size(innerWidth, 0);
                         }
-                        if (child is QuotaMeter) child.Width = innerWidth - 6;
+                        if (child is QuotaMeter) child.Width = innerWidth - S(6);
                     }
                     inner.Width = innerWidth;
                     inner.PerformLayout();
                     int height = inner.GetPreferredSize(new Size(innerWidth, 0)).Height;
+                    foreach (Control child in inner.Controls)
+                        if (child.Visible) height = Math.Max(height, child.Top + Math.Max(child.Height, child.MinimumSize.Height) + child.Margin.Bottom);
                     inner.Size = new Size(innerWidth, height);
                     card.Size = new Size(width, height + card.Padding.Vertical);
                 }
@@ -374,17 +375,17 @@ namespace QuotaTrayApp
         }
         private Label TextLine(string text, bool bold)
         {
-            Label l = new Label(); l.Text = T(text); l.AutoSize = true; l.MaximumSize = new Size(760, 0);
+            Label l = new UiLabel(); l.Text = T(text); l.AutoSize = true; l.MaximumSize = new Size(S(760), 0);
             l.Margin = new Padding(0, 0, 0, LayoutGap); if (bold) l.Font = new Font(Font, FontStyle.Bold); return l;
         }
         private Button Button(string text, bool accent, EventHandler click)
         {
             UiButton b = new UiButton(); b.Accent = accent; b.Text = T(text); b.AutoSize = true;
-            b.MinimumSize = new Size(100, ControlHeight); b.Height = ControlHeight; b.Margin = new Padding(0, 0, LayoutGap, 0); b.Click += click; return b;
+            b.MinimumSize = new Size(S(100), ControlHeight); b.Height = ControlHeight; b.Margin = new Padding(0, 0, LayoutGap, 0); b.Click += click; return b;
         }
         private FlowLayoutPanel Row()
         {
-            FlowLayoutPanel row = new FlowLayoutPanel(); row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            FlowLayoutPanel row = new UiFlowPanel(); row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             row.WrapContents = true; row.Margin = new Padding(0); return row;
         }
         private void Call(Action action) { if (action != null) action(); }
@@ -416,11 +417,11 @@ namespace QuotaTrayApp
         }
         private Control AccountHeader(SettingsAccount account)
         {
-            FlowLayoutPanel row = new FlowLayoutPanel(); row.Name = "account-header"; row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink; row.WrapContents = false; row.Margin = new Padding(0, 0, 0, LayoutGap);
-            Label number = new Label(); number.AutoSize = true; number.Text = AccountNumber(account); number.Name = "account-number"; number.Tag = account.Slot; number.Font = new Font(Font, FontStyle.Bold); number.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(number);
-            Label divider = new Label(); divider.AutoSize = true; divider.Text = "|"; divider.ForeColor = UiTheme.Border; divider.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(divider);
-            Label plan = new Label(); plan.AutoSize = true; plan.Text = String.IsNullOrEmpty(account.Plan) ? "" : account.Plan; plan.ForeColor = UiTheme.TextColor; plan.Font = new Font(Font, FontStyle.Bold); plan.Margin = new Padding(0, 0, 8, 0); if (!String.IsNullOrEmpty(plan.Text)) row.Controls.Add(plan);
-            Label email = new Label(); email.AutoSize = true; email.Text = account.EmailMask ?? ""; email.ForeColor = UiTheme.Muted; email.Margin = new Padding(0); if (!String.IsNullOrEmpty(email.Text)) row.Controls.Add(email);
+            FlowLayoutPanel row = new UiFlowPanel(); row.Name = "account-header"; row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink; row.WrapContents = false; row.Margin = new Padding(0, 0, 0, LayoutGap);
+            Label number = new UiLabel(); number.AutoSize = true; number.Text = AccountNumber(account); number.Name = "account-number"; number.Tag = account.Slot; number.Font = new Font(Font, FontStyle.Bold); number.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(number);
+            Label divider = new UiLabel(); divider.AutoSize = true; divider.Text = "|"; divider.ForeColor = UiTheme.Border; divider.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(divider);
+            Label plan = new UiLabel(); plan.AutoSize = true; plan.Text = String.IsNullOrEmpty(account.Plan) ? "" : account.Plan; plan.ForeColor = UiTheme.TextColor; plan.Font = new Font(Font, FontStyle.Bold); plan.Margin = new Padding(0, 0, 8, 0); if (!String.IsNullOrEmpty(plan.Text)) row.Controls.Add(plan);
+            Label email = new UiLabel(); email.AutoSize = true; email.Text = account.EmailMask ?? ""; email.ForeColor = UiTheme.Muted; email.Margin = new Padding(0); if (!String.IsNullOrEmpty(email.Text)) row.Controls.Add(email);
             return row;
         }
 
@@ -461,7 +462,7 @@ namespace QuotaTrayApp
             foreach (WindowInfo window in new[] { account.Primary, account.Secondary })
             {
                 if (!QuotaMeter.Valid(window)) continue;
-                if (window.windowMins > 1440) longWindow = window; else shortWindow = window;
+                if (QuotaWindow.IsLong(window.windowMins)) longWindow = window; else shortWindow = window;
             }
             int count = shortWindow != null && longWindow != null ? 2 : 1;
             changed |= row.Controls.Count != count;
@@ -470,7 +471,7 @@ namespace QuotaTrayApp
             {
                 WindowInfo window = i == 0 && shortWindow != null ? shortWindow : longWindow;
                 string title = window == null ? L.T("正在读取额度…") : window == shortWindow ? L.T("5 小时额度") :
-                    L.F("{0} 天额度", (int)Math.Round(window.windowMins / 1440));
+                    L.F("{0} 天额度", QuotaWindow.Days(window.windowMins));
                 if (i < row.Controls.Count) ((QuotaMeter)row.Controls[i]).UpdateQuota(window, title);
                 else
                 {
@@ -515,12 +516,18 @@ namespace QuotaTrayApp
             foreach (SettingsAccount account in snapshot.Accounts) { desktop.Items.Add(AccountSummary(account)); desktopSlots.Add(account.Slot); }
             int selected = desktopSlots.IndexOf(snapshot.DesktopSlot ?? "auto"); desktop.SelectedIndex = selected < 0 ? 0 : selected;
             inner.Controls.Add(desktop);
-            error = TextLine("", false); error.Name = "display-error"; error.AutoSize = false; error.Height = 0; error.Margin = new Padding(0); inner.Controls.Add(error);
+            error = TextLine("", false); error.Name = "display-error"; error.Visible = false; error.Margin = new Padding(0); inner.Controls.Add(error);
             Button save = Button("保存显示设置", true, SaveDisplay); save.Name = "save-display"; inner.Controls.Add(save);
         }
         private void SetDisplayError(string text)
         {
-            error.Text = text ?? ""; error.Height = String.IsNullOrEmpty(error.Text) ? 0 : 24; error.AutoSize = false;
+            string next = text ?? "";
+            bool show = !String.IsNullOrEmpty(next);
+            if (error.Text == next && error.Visible == show) return;
+            error.Text = next;
+            error.Visible = show;
+            error.Margin = new Padding(0, 0, 0, show ? LayoutGap : 0);
+            ResizeCards();
         }
         private void SaveDisplay(object sender, EventArgs e)
         {
@@ -529,7 +536,7 @@ namespace QuotaTrayApp
             if (selected.Count == 0) { SetDisplayError(T("请至少选择一个显示账号。")); return; }
             if (actions.SaveDisplay == null || !actions.SaveDisplay(selected.ToArray(), desktopSlots[desktop.SelectedIndex]))
             { SetDisplayError(T("保存失败，请重试。")); return; }
-            SetDisplayError(T("已保存。"));
+            SetDisplayError(null);
         }
         private FlowLayoutPanel ChoiceRow(string name, string[] labels, int selected, Action<int> choose, string[] descriptions = null, string accountSlot = null)
         {
@@ -554,12 +561,13 @@ namespace QuotaTrayApp
 
         private int ChoiceWidth()
         {
-            int width = 88;
+            int width = S(88);
+            int pad = S(16);
             foreach (string label in Levels.Concat(Appearances))
             {
-                width = Math.Max(width, TextRenderer.MeasureText(label, Font).Width + 16);
+                width = Math.Max(width, TextRenderer.MeasureText(label, Font).Width + pad);
                 foreach (string translation in Translations[label])
-                    width = Math.Max(width, TextRenderer.MeasureText(translation, Font).Width + 16);
+                    width = Math.Max(width, TextRenderer.MeasureText(translation, Font).Width + pad);
             }
             return width;
         }
@@ -605,7 +613,7 @@ namespace QuotaTrayApp
             });
             apply.Name = "apply-global-level";
             apply.AutoSize = false;
-            apply.Size = new Size(100, ControlHeight);
+            apply.Size = new Size(S(100), ControlHeight);
             Action<int> select = delegate(int level)
             {
                 pendingGlobalLevel = level;
@@ -679,14 +687,16 @@ namespace QuotaTrayApp
         }
         private void EqualizeActions(FlowLayoutPanel row)
         {
-            int width = 100;
+            int width = S(100);
+            int textPad = S(32), iconPad = S(58);
             foreach (UiButton button in row.Controls)
-                width = Math.Max(width, TextRenderer.MeasureText(button.Text, Font).Width + (String.IsNullOrEmpty(button.IconKind) ? 32 : 58));
+                width = Math.Max(width, TextRenderer.MeasureText(button.Text, Font).Width + (String.IsNullOrEmpty(button.IconKind) ? textPad : iconPad));
+            int wrapGap = S(6);
             foreach (UiButton button in row.Controls)
             {
                 button.AutoSize = false;
                 button.Size = new Size(width, ControlHeight);
-                button.Margin = new Padding(0, 0, LayoutGap, 6);
+                button.Margin = new Padding(0, 0, LayoutGap, wrapGap);
             }
             row.Controls[row.Controls.Count - 1].Margin = Padding.Empty;
         }
@@ -713,9 +723,9 @@ namespace QuotaTrayApp
         internal static Color WarningText { get { return Dark ? Color.FromArgb(252, 154, 158) : Color.FromArgb(161, 35, 52); } }
         internal static Color Surface { get { return Dark ? Color.FromArgb(47, 47, 47) : Color.White; } }
         internal static Color Input { get { return Dark ? Color.FromArgb(57, 57, 57) : Color.FromArgb(239, 242, 246); } }
-        internal static Color TextColor { get { return Dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(32, 40, 49); } }
-        internal static Color Muted { get { return Dark ? Color.FromArgb(176, 182, 190) : Color.FromArgb(97, 109, 121); } }
-        internal static Color Accent { get { return Dark ? Color.FromArgb(125, 221, 184) : Color.FromArgb(23, 107, 84); } }
+        internal static Color TextColor { get { return Dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(14, 19, 26); } }
+        internal static Color Muted { get { return Dark ? Color.FromArgb(176, 182, 190) : Color.FromArgb(52, 62, 74); } }
+        internal static Color Accent { get { return Dark ? Color.FromArgb(125, 221, 184) : Color.FromArgb(12, 84, 64); } }
         internal static Color Selection { get { return Dark ? Color.FromArgb(40, 68, 58) : Color.FromArgb(204, 228, 216); } }
         internal static Color Border { get { return Dark ? Color.FromArgb(70, 74, 78) : Color.FromArgb(212, 219, 226); } }
         // Account colors belong to slots a–e and stay stable when other slots are removed.
@@ -724,8 +734,8 @@ namespace QuotaTrayApp
             Color.FromArgb(240, 193, 108), Color.FromArgb(242, 155, 199)
         };
         private static readonly Color[] LightAccounts = {
-            Color.FromArgb(23, 107, 84), Color.FromArgb(26, 97, 161), Color.FromArgb(111, 70, 169),
-            Color.FromArgb(136, 88, 18), Color.FromArgb(148, 56, 107)
+            Color.FromArgb(12, 84, 64), Color.FromArgb(20, 84, 146), Color.FromArgb(98, 56, 152),
+            Color.FromArgb(122, 76, 12), Color.FromArgb(136, 44, 96)
         };
         internal static int AccountNumber(string slot)
         {
@@ -749,6 +759,157 @@ namespace QuotaTrayApp
         [DllImport("uxtheme.dll", CharSet=CharSet.Unicode)] private static extern int SetWindowTheme(IntPtr hwnd,string subApp,string subId);
         [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateSolidBrush(int color);
+        [DllImport("user32.dll")] private static extern int FillRect(IntPtr hdc, ref NativeRect rect, IntPtr brush);
+        [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+        [DllImport("user32.dll")] private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionData data);
+        [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] private struct AccentPolicy { public int AccentState, AccentFlags; public uint GradientColor; public int AnimationId; }
+        [StructLayout(LayoutKind.Sequential)] private struct WindowCompositionData { public int Attribute; public IntPtr Data; public int SizeOfData; }
+        private static readonly IntPtr ZeroBrush = CreateSolidBrush(0);
+
+        internal static float SystemDpiScale()
+        {
+            try { using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) return Math.Max(1f, g.DpiX / 96f); }
+            catch { return 1f; }
+        }
+        internal static int S(int px, float scale) { return scale == 1f ? px : (int)Math.Round(px * scale); }
+        internal static float DpiScaleOf(Control control)
+        {
+            if (control == null) return SystemDpiScale();
+            UiWindow window = control.FindForm() as UiWindow;
+            return window != null ? window.UiScale : SystemDpiScale();
+        }
+
+        internal static int DarkGlassBaseAlpha = 12, LightGlassBaseAlpha = 22;
+        internal static int DarkSidebarGlassAlpha = 130, LightSidebarGlassAlpha = 96;
+        internal static int DarkContentGlassAlpha = 32, LightContentGlassAlpha = 78;
+        internal static int DarkCardGlassAlpha = 136, LightCardGlassAlpha = 62;
+
+        internal static Color GlassMuted { get { return Dark ? Muted : Color.FromArgb(28, 36, 46); } }
+        internal static Color SidebarGlassTint { get { return Dark ? Color.FromArgb(DarkSidebarGlassAlpha, 34, 36, 40) : Color.FromArgb(LightSidebarGlassAlpha, 247, 249, 250); } }
+        internal static Color ContentGlassTint { get { return Dark ? Color.FromArgb(DarkContentGlassAlpha, 31, 31, 31) : Color.FromArgb(LightContentGlassAlpha, 245, 248, 249); } }
+        internal static Color CardGlassColor(Color surface) { return Color.FromArgb(Dark ? DarkCardGlassAlpha : LightCardGlassAlpha, surface); }
+        internal static bool IsGlass(Control control)
+        {
+            if (control == null) return false;
+            Form form = control.FindForm();
+            UiWindow window = form as UiWindow;
+            if (window != null) return window.GlassEnabled;
+            ToastForm toast = form as ToastForm;
+            return toast != null && toast.GlassEnabled;
+        }
+        internal static void ClearGlass(Graphics g, Rectangle rect)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0) return;
+            IntPtr hdc = g.GetHdc();
+            try
+            {
+                NativeRect rc = new NativeRect { Left = rect.Left, Top = rect.Top, Right = rect.Right, Bottom = rect.Bottom };
+                FillRect(hdc, ref rc, ZeroBrush);
+            }
+            finally { g.ReleaseHdc(hdc); }
+        }
+        internal static void SetAcrylic(IntPtr hwnd, bool enabled)
+        {
+            uint a = (uint)Math.Max(0, Math.Min(255, Dark ? DarkGlassBaseAlpha : LightGlassBaseAlpha));
+            // Light mode keeps RGB <= 200 in GradientColor because Win11 DWM triggers an ~85% white veil or dark cutoff above ~205.
+            uint rgb = Dark ? 0x001D2028u : 0x00C8C6C4u;
+            uint gradient = (a << 24) | rgb;
+            AccentPolicy policy = new AccentPolicy { AccentState = enabled ? 4 : 0, AccentFlags = 0, GradientColor = enabled ? gradient : 0u };
+            int size = Marshal.SizeOf(policy);
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(policy, ptr, false);
+                WindowCompositionData data = new WindowCompositionData { Attribute = 19, Data = ptr, SizeOfData = size };
+                SetWindowCompositionAttribute(hwnd, ref data);
+            }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+            finally { Marshal.FreeHGlobal(ptr); }
+        }
+        private static bool IsInSidebar(Control control)
+        {
+            for (Control c = control; c != null; c = c.Parent)
+                if (c.Name == "sidebar" || c.Name == "version-label") return true;
+            return false;
+        }
+        private static UiCard FindCardParent(Control control)
+        {
+            for (Control c = control == null ? null : control.Parent; c != null; c = c.Parent)
+                if (c is UiCard) return (UiCard)c;
+            return null;
+        }
+        internal static void PaintUnderlay(Control control, Graphics g, Rectangle rect, Color? opaqueFallback = null)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0) return;
+            if (!IsGlass(control))
+            {
+                Color fallback = opaqueFallback ?? (control != null && control.Parent != null ? control.Parent.BackColor : Background);
+                using (Brush b = new SolidBrush(fallback)) g.FillRectangle(b, rect);
+                return;
+            }
+            ClearGlass(g, rect);
+            if (IsInSidebar(control))
+            {
+                using (Brush b = new SolidBrush(SidebarGlassTint)) g.FillRectangle(b, rect);
+                return;
+            }
+            using (Brush content = new SolidBrush(ContentGlassTint)) g.FillRectangle(content, rect);
+            UiCard card = FindCardParent(control);
+            if (card != null)
+            {
+                Color cardFill = card.HasTextBox ? card.SurfaceColor : CardGlassColor(card.SurfaceColor);
+                using (Brush b = new SolidBrush(cardFill)) g.FillRectangle(b, rect);
+            }
+        }
+        internal static void PaintSplitGlass(UiWindow window, Graphics g, int width, int height)
+        {
+            Rectangle full = new Rectangle(0, 0, width, height);
+            if (width <= 0 || height <= 0) return;
+            if (window == null || !window.GlassEnabled)
+            {
+                g.Clear(Background);
+                Control sb = window == null ? null : window.Controls["sidebar"];
+                if (sb != null) using (Brush fill = new SolidBrush(Sidebar)) g.FillRectangle(fill, 0, 0, sb.Right, height);
+                return;
+            }
+            ClearGlass(g, full);
+            Control sidebar = window.Controls["sidebar"];
+            if (sidebar != null && sidebar.Right > 0)
+            {
+                int split = Math.Min(width, sidebar.Right);
+                using (Brush left = new SolidBrush(SidebarGlassTint)) g.FillRectangle(left, 0, 0, split, height);
+                if (split < width)
+                    using (Brush right = new SolidBrush(ContentGlassTint)) g.FillRectangle(right, split, 0, width - split, height);
+                if (!Dark && split > 0 && split < width)
+                    using (Pen hairline = new Pen(Color.FromArgb(28, 15, 23, 42))) g.DrawLine(hairline, split - 1, 0, split - 1, height);
+            }
+            else
+            {
+                using (Brush right = new SolidBrush(ContentGlassTint)) g.FillRectangle(right, full);
+            }
+        }
+        internal static void DrawText(Control control, Graphics g, string text, Font font, Rectangle bounds, Color color, TextFormatFlags flags)
+        {
+            if (String.IsNullOrEmpty(text)) return;
+            if (!IsGlass(control))
+            {
+                TextRenderer.DrawText(g, text, font, bounds, color, flags);
+                return;
+            }
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
+            using (Brush brush = new SolidBrush(color))
+            {
+                fmt.Alignment = (flags & TextFormatFlags.HorizontalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
+                fmt.LineAlignment = (flags & TextFormatFlags.VerticalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
+                fmt.Trimming = (flags & TextFormatFlags.EndEllipsis) != 0 ? StringTrimming.EllipsisCharacter : StringTrimming.None;
+                fmt.FormatFlags = (flags & TextFormatFlags.SingleLine) != 0 ? StringFormatFlags.NoWrap : 0;
+                g.DrawString(text, font, brush, bounds, fmt);
+            }
+        }
         internal static void Present(Form form)
         {
             if (form.WindowState == FormWindowState.Minimized) form.WindowState = FormWindowState.Normal;
@@ -757,20 +918,55 @@ namespace QuotaTrayApp
             ShowWindow(form.Handle, 9);
             form.BringToFront(); form.Activate();
         }
-        private static void Frame(Form form)
+        internal static void PaintCardGlassBackground(Graphics g, Rectangle rect)
         {
-            if (!form.IsHandleCreated) return;
-            bool systemCorners = false;
+            if (rect.Width <= 0 || rect.Height <= 0) return;
+            ClearGlass(g, rect);
+            using (Brush content = new SolidBrush(ContentGlassTint)) g.FillRectangle(content, rect);
+            using (Brush card = new SolidBrush(CardGlassColor(Surface))) g.FillRectangle(card, rect);
+        }
+        internal static bool ApplyWindowFrame(Form form, out bool systemCorners)
+        {
+            systemCorners = false;
+            if (form == null || !form.IsHandleCreated) return false;
             try
             {
                 int dark = Dark ? 1 : 0, corner = 2;
                 DwmSetWindowAttribute(form.Handle, 20, ref dark, 4);
                 DwmSetWindowAttribute(form.Handle, 19, ref dark, 4);
                 systemCorners = DwmSetWindowAttribute(form.Handle, 33, ref corner, 4) == 0;
+                if (systemCorners)
+                {
+                    int borderColor = Dark ? 0x004E4A46 : 0x00C4BCB4;
+                    DwmSetWindowAttribute(form.Handle, 34, ref borderColor, 4);
+                }
             }
             catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+            return systemCorners && UiBackdrop.Allowed();
+        }
+        private static void Frame(Form form)
+        {
+            if (!form.IsHandleCreated) return;
+            bool systemCorners;
+            bool glass = ApplyWindowFrame(form, out systemCorners);
             UiWindow window = form as UiWindow;
-            if (window != null) window.UseLocalCorners(!systemCorners);
+            if (window != null)
+            {
+                window.UseLocalCorners(!systemCorners);
+                window.ApplyGlass(glass);
+            }
+        }
+        internal static void RefreshGlass(Form form)
+        {
+            if (form == null || form.IsDisposed || !form.IsHandleCreated) return;
+            UiWindow window = form as UiWindow;
+            if (window != null && window.GlassEnabled) SetAcrylic(window.Handle, true);
+            RefreshTree(form);
+        }
+        private static void RefreshTree(Control root)
+        {
+            root.Invalidate(true);
+            foreach (Control child in root.Controls) RefreshTree(child);
         }
         internal static void ClipRoundedWindow(Form form, int radius)
         {
@@ -779,26 +975,39 @@ namespace QuotaTrayApp
         }
         internal static void Hook(Form form)
         {
-            EventHandler apply = delegate { if (!form.IsDisposed) { Apply(form); Frame(form); } };
+            EventHandler apply = delegate { if (!form.IsDisposed) { Frame(form); Apply(form); } };
             Changed += apply;
-            form.HandleCreated += delegate { Frame(form); };
-            form.Shown += delegate { Apply(form); Frame(form); };
+            form.HandleCreated += delegate { Frame(form); Apply(form); };
             form.Disposed += delegate { Changed -= apply; };
             Apply(form);
         }
         internal static void Apply(Control root)
         {
+            bool glass = IsGlass(root);
             root.ForeColor = TextColor;
-            if (root is Form) root.BackColor = Background;
+            if (root is Form) root.BackColor = glass ? Color.Black : Background;
+            else if (root is Label)
+            {
+                ((Label)root).UseCompatibleTextRendering = glass;
+                root.BackColor = glass ? Color.Transparent : (root.Name == "version-label" ? Sidebar : root.Parent == null ? Background : root.Parent.BackColor);
+            }
             else if (root.Name == "sidebar" || root.Name == "version-label") root.BackColor = Sidebar;
             else if (root is UiCard) root.BackColor = ((UiCard)root).SurfaceColor;
             else if (root is UiComboBox) root.BackColor = Input;
             else if (root is TextBox) root.BackColor = Surface;
+            else if (root is UiButton || root is UiChoice || root is UiCheckBox)
+            {
+                UiCard card = FindCardParent(root);
+                root.BackColor = card != null ? card.SurfaceColor : Surface;
+            }
             else root.BackColor = root.Parent == null ? Background : root.Parent.BackColor;
-            if (root.Name == "page-caption" || root.Name == "global-level-help" || root.Name == "global-level-error" || root.Name == "min-visible-accounts") root.ForeColor = Muted;
+            if (root.Name == "page-caption" && root.FindForm() is QuotaSettingsForm)
+                root.ForeColor = Dark ? Color.FromArgb(82, 135, 116) : Color.FromArgb(54, 89, 77);
+            else if (root.Name == "page-caption" || root.Name == "global-level-help" || root.Name == "global-level-error" || root.Name == "min-visible-accounts")
+                root.ForeColor = glass ? GlassMuted : Muted;
             if (root.Name == "account-number") root.ForeColor = AccountColor(root.Tag as string);
             if (root.Name == "account-status-warning") root.ForeColor = WarningText;
-            if (root.Name == "version-label") root.ForeColor = Dark ? Color.FromArgb(120, 123, 124) : Color.FromArgb(117, 126, 120);
+            if (root.Name == "version-label") root.ForeColor = Dark ? Color.FromArgb(120, 123, 124) : (glass ? Color.FromArgb(40, 50, 60) : Color.FromArgb(92, 102, 108));
             foreach (Control child in root.Controls) Apply(child);
             if (root.IsHandleCreated && (root is ScrollableControl))
             {
@@ -829,10 +1038,36 @@ namespace QuotaTrayApp
             p.AddBezier(r.Left,r.Top+rr,r.Left,r.Top+rr-c,r.Left+rr-c,r.Top,r.Left+rr,r.Top);
             p.CloseFigure(); return p;
         }
-        internal static void Card(Graphics g, Rectangle r, Color fill, Color border)
+        internal static GraphicsPath RoundCorners(RectangleF r, float topLeft, float topRight, float bottomRight, float bottomLeft)
+        {
+            GraphicsPath p = new GraphicsPath();
+            float max = Math.Max(1f, Math.Min(r.Width, r.Height) / 2f);
+            float a = Math.Min(max, Math.Max(0f, topLeft)), b = Math.Min(max, Math.Max(0f, topRight));
+            float c = Math.Min(max, Math.Max(0f, bottomRight)), d = Math.Min(max, Math.Max(0f, bottomLeft));
+            float x0 = r.Left, y0 = r.Top, x1 = r.Right, y1 = r.Bottom;
+            if (a > 0) p.AddArc(x0, y0, a * 2, a * 2, 180, 90);
+            if (b > 0) { p.AddLine(x0 + a, y0, x1 - b, y0); p.AddArc(x1 - b * 2, y0, b * 2, b * 2, 270, 90); }
+            else p.AddLine(x0 + a, y0, x1, y0);
+            if (c > 0) { p.AddLine(x1, y0 + b, x1, y1 - c); p.AddArc(x1 - c * 2, y1 - c * 2, c * 2, c * 2, 0, 90); }
+            else p.AddLine(x1, y0 + b, x1, y1);
+            if (d > 0) { p.AddLine(x1 - c, y1, x0 + d, y1); p.AddArc(x0, y1 - d * 2, d * 2, d * 2, 90, 90); }
+            else p.AddLine(x1 - c, y1, x0, y1);
+            p.CloseFigure();
+            return p;
+        }
+        internal static Color QuotaInk(double remaining)
+        {
+            if (remaining < 0) return Dark ? Color.FromArgb(245, 247, 250) : Color.FromArgb(104, 116, 128);
+            if (remaining <= 0) return Dark ? Color.FromArgb(255, 244, 243) : Color.FromArgb(148, 18, 30);
+            if (remaining <= 25) return Dark ? Color.FromArgb(255, 242, 248) : Color.FromArgb(178, 44, 60);
+            if (remaining < 75) return Dark ? Color.FromArgb(255, 246, 213) : Color.FromArgb(146, 98, 8);
+            return Dark ? Color.FromArgb(224, 255, 239) : Color.FromArgb(18, 118, 80);
+        }
+        internal static void Card(Graphics g, Rectangle r, Color fill, Color border, bool gammaCorrect = true)
         {
             if(r.Width<4||r.Height<4)return;
-            g.SmoothingMode=SmoothingMode.AntiAlias; g.PixelOffsetMode=PixelOffsetMode.HighQuality; g.CompositingQuality=CompositingQuality.GammaCorrected;
+            g.SmoothingMode=SmoothingMode.AntiAlias; g.PixelOffsetMode=PixelOffsetMode.HighQuality;
+            g.CompositingQuality=gammaCorrect ? CompositingQuality.GammaCorrected : CompositingQuality.Default;
             RectangleF outer=new RectangleF(r.X+.5f,r.Y+.5f,r.Width-1,r.Height-1);
             using(GraphicsPath path=SmoothRound(outer,CardRadius))
             using(Brush surface=new SolidBrush(fill))
@@ -888,6 +1123,65 @@ namespace QuotaTrayApp
             }
 
             PaintRoundedSurface(g, rect, top, bottom, edge);
+        }
+
+        internal static void PaintGlassSurface(Graphics g, Rectangle rect, Color top, Color bottom, Color? border, int radius = Radius)
+        {
+            if (rect.Width < 2 || rect.Height < 2) return;
+            RectangleF outer = new RectangleF(rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1f, rect.Height - 1f);
+            float r = Math.Min(radius, Math.Min(outer.Width, outer.Height) / 2f);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            using (GraphicsPath path = SmoothRound(outer, r))
+            {
+                using (LinearGradientBrush brush = new LinearGradientBrush(rect, top, bottom, 90f))
+                    g.FillPath(brush, path);
+                if (border.HasValue && border.Value.A > 0)
+                    using (Pen edge = new Pen(border.Value, 1f))
+                        g.DrawPath(edge, path);
+            }
+        }
+
+        internal static void LightGlassMaterial(Graphics g, Rectangle rect, bool accent, bool danger, bool hover, bool pressed, bool enabled, bool selected = false, Color? selectionColor = null)
+        {
+            if (rect.Width < 2 || rect.Height < 2) return;
+            if (accent || danger)
+            {
+                Color color = danger ? Color.FromArgb(143, 50, 66) : Accent;
+                Color top = Blend(color, Color.White, hover ? 22 : 12);
+                Color bottom = Blend(color, Color.Black, pressed ? 28 : 18);
+                Color edge = Blend(color, Color.Black, 26);
+                int fillAlpha = enabled ? 245 : 128;
+                PaintGlassSurface(g, rect, Color.FromArgb(fillAlpha, top), Color.FromArgb(fillAlpha, bottom),
+                    Color.FromArgb(fillAlpha, edge));
+                return;
+            }
+            if (selected)
+            {
+                Color sel = selectionColor ?? Accent;
+                Color top = Color.FromArgb(hover ? 132 : 112, Blend(Color.White, sel, 78));
+                Color bottom = Color.FromArgb(hover ? 108 : 88, Blend(Color.White, sel, 112));
+                PaintGlassSurface(g, rect, top, bottom, Color.FromArgb(185, sel));
+                return;
+            }
+            if (!enabled)
+            {
+                PaintGlassSurface(g, rect, Color.FromArgb(42, 232, 238, 244), Color.FromArgb(26, 210, 218, 226), Color.FromArgb(56, 72, 84, 96));
+                return;
+            }
+            if (pressed)
+            {
+                PaintGlassSurface(g, rect, Color.FromArgb(88, 178, 194, 206), Color.FromArgb(104, 160, 178, 192), Color.FromArgb(135, 24, 38, 52));
+                return;
+            }
+            if (hover)
+            {
+                PaintGlassSurface(g, rect, Color.FromArgb(96, 222, 236, 231), Color.FromArgb(74, 190, 212, 205),
+                    Color.FromArgb(148, 12, 84, 64));
+                return;
+            }
+            PaintGlassSurface(g, rect, Color.FromArgb(66, 240, 245, 249), Color.FromArgb(38, 210, 220, 230),
+                Color.FromArgb(92, 42, 54, 68));
         }
 
         private static void PaintRoundedSurface(Graphics graphics, Rectangle rect, Color top, Color bottom, Color? border)
@@ -990,21 +1284,173 @@ namespace QuotaTrayApp
     }
     internal class UiCard : GroupBox
     {
-        internal UiCard() { SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
+        private Font cachedBoldFont;
+        private Font cachedBoldSource;
+        internal UiCard() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
         internal string AccountSlot { get; set; }
+        internal bool HasTextBox { get { foreach (Control c in Controls) if (c is TextBox) return true; return false; } }
         internal virtual Color SurfaceColor
         {
             get { return AccountSlot == null ? UiTheme.Surface : UiTheme.Blend(UiTheme.Surface, UiTheme.AccountColor(AccountSlot), UiTheme.Dark ? 16 : 12); }
         }
         protected virtual Color BorderColor
         {
-            get { return AccountSlot == null ? UiTheme.Border : UiTheme.Blend(UiTheme.Border, UiTheme.AccountColor(AccountSlot), 132); }
+            get
+            {
+                if (AccountSlot != null) return UiTheme.Blend(UiTheme.Border, UiTheme.AccountColor(AccountSlot), UiTheme.IsGlass(this) && !UiTheme.Dark ? 96 : 132);
+                return UiTheme.IsGlass(this) && !UiTheme.Dark ? Color.FromArgb(145, 165, 178, 190) : UiTheme.Border;
+            }
         }
-        protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(Parent == null ? UiTheme.Background : Parent.BackColor); }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (UiTheme.IsGlass(this))
+            {
+                UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+                Color fill = HasTextBox ? SurfaceColor : UiTheme.CardGlassColor(SurfaceColor);
+                UiTheme.Card(e.Graphics, ClientRectangle, fill, BorderColor, false);
+                return;
+            }
+            e.Graphics.Clear(Parent == null ? UiTheme.Background : Parent.BackColor);
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
-            UiTheme.Card(e.Graphics,ClientRectangle,SurfaceColor,BorderColor);
-            if (!String.IsNullOrEmpty(Text)) using (Font bold = new Font(Font,FontStyle.Bold)) TextRenderer.DrawText(e.Graphics,Text,bold,new Rectangle(14,14,Width-28,28),UiTheme.TextColor,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            if (!UiTheme.IsGlass(this)) UiTheme.Card(e.Graphics,ClientRectangle,SurfaceColor,BorderColor);
+            if (!String.IsNullOrEmpty(Text))
+            {
+                if (cachedBoldFont == null || !ReferenceEquals(cachedBoldSource, Font))
+                {
+                    if (cachedBoldFont != null) cachedBoldFont.Dispose();
+                    cachedBoldSource = Font;
+                    cachedBoldFont = new Font(Font, FontStyle.Bold);
+                }
+                float s = UiTheme.DpiScaleOf(this);
+                int inset = UiTheme.S(14, s);
+                UiTheme.DrawText(this, e.Graphics, Text, cachedBoldFont,
+                    new Rectangle(inset, inset, Width - inset * 2, UiTheme.S(28, s)),
+                    UiTheme.TextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && cachedBoldFont != null) { cachedBoldFont.Dispose(); cachedBoldFont = null; cachedBoldSource = null; }
+            base.Dispose(disposing);
+        }
+    }
+    internal sealed class UiFlowPanel : FlowLayoutPanel
+    {
+        internal UiFlowPanel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (UiTheme.IsGlass(this))
+            {
+                UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+                if (Name == "sidebar" && !UiTheme.Dark && Width > 0)
+                    using (Pen hairline = new Pen(Color.FromArgb(28, 15, 23, 42))) e.Graphics.DrawLine(hairline, Width - 1, 0, Width - 1, Height);
+            }
+            else base.OnPaintBackground(e);
+        }
+        protected override void OnScroll(ScrollEventArgs se)
+        {
+            base.OnScroll(se);
+            if (UiTheme.IsGlass(this)) Invalidate();
+        }
+    }
+    internal sealed class UiPanel : Panel
+    {
+        internal UiPanel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (UiTheme.IsGlass(this))
+            {
+                UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+                if (Name == "sidebar" && !UiTheme.Dark && Width > 0)
+                    using (Pen hairline = new Pen(Color.FromArgb(28, 15, 23, 42))) e.Graphics.DrawLine(hairline, Width - 1, 0, Width - 1, Height);
+            }
+            else base.OnPaintBackground(e);
+        }
+        protected override void OnScroll(ScrollEventArgs se)
+        {
+            base.OnScroll(se);
+            if (UiTheme.IsGlass(this)) Invalidate();
+        }
+    }
+    internal sealed class UiLabel : Label
+    {
+        internal UiLabel()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (UiTheme.IsGlass(this)) UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+            else base.OnPaintBackground(e);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            if (!UiTheme.IsGlass(this)) { base.OnPaint(e); return; }
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            Color color = Enabled ? ForeColor : UiTheme.Muted;
+            using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
+            using (Brush brush = new SolidBrush(color))
+            {
+                fmt.HotkeyPrefix = UseMnemonic ? HotkeyPrefix.Show : HotkeyPrefix.None;
+                if (AutoEllipsis) fmt.Trimming = StringTrimming.EllipsisCharacter;
+                if (TextAlign == ContentAlignment.MiddleLeft || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.MiddleRight)
+                    fmt.LineAlignment = StringAlignment.Center;
+                else if (TextAlign == ContentAlignment.BottomLeft || TextAlign == ContentAlignment.BottomCenter || TextAlign == ContentAlignment.BottomRight)
+                    fmt.LineAlignment = StringAlignment.Far;
+                if (TextAlign == ContentAlignment.TopCenter || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.BottomCenter)
+                    fmt.Alignment = StringAlignment.Center;
+                else if (TextAlign == ContentAlignment.TopRight || TextAlign == ContentAlignment.MiddleRight || TextAlign == ContentAlignment.BottomRight)
+                    fmt.Alignment = StringAlignment.Far;
+                e.Graphics.DrawString(Text, Font, brush, ClientRectangle, fmt);
+            }
+        }
+    }
+    internal sealed class AlphaTextBox : TextBox
+    {
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+        private bool painting;
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x000F && !painting && UiTheme.IsGlass(this))
+            {
+                painting = true;
+                try
+                {
+                    base.WndProc(ref m);
+                    int w = Math.Max(1, ClientSize.Width), h = Math.Max(1, ClientSize.Height);
+                    using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+                    {
+                        using (Graphics gb = Graphics.FromImage(bmp))
+                        {
+                            IntPtr hdc = gb.GetHdc();
+                            try { SendMessage(Handle, 0x0318, hdc, new IntPtr(4)); }
+                            finally { gb.ReleaseHdc(hdc); }
+                        }
+                        BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+                        try
+                        {
+                            int n = Math.Abs(bd.Stride) * h;
+                            byte[] buf = new byte[n];
+                            Marshal.Copy(bd.Scan0, buf, 0, n);
+                            for (int i = 3; i < n; i += 4) buf[i] = 255;
+                            Marshal.Copy(buf, 0, bd.Scan0, n);
+                        }
+                        finally { bmp.UnlockBits(bd); }
+                        using (Graphics g = Graphics.FromHwnd(Handle)) g.DrawImageUnscaled(bmp, 0, 0);
+                    }
+                    return;
+                }
+                finally { painting = false; }
+            }
+            base.WndProc(ref m);
         }
     }
     internal sealed class UiButton : Button
@@ -1024,29 +1470,36 @@ namespace QuotaTrayApp
         protected override void OnMouseUp(MouseEventArgs e) { pressed=false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Parent == null ? UiTheme.Background : Parent.BackColor);
-            UiTheme.Material(e.Graphics,ClientRectangle,BackColor,Accent,Danger,hover,pressed,Enabled);
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+            if (UiTheme.IsGlass(this) && !UiTheme.Dark)
+                UiTheme.LightGlassMaterial(e.Graphics, ClientRectangle, Accent, Danger, hover, pressed, Enabled);
+            else
+                UiTheme.Material(e.Graphics,ClientRectangle,BackColor,Accent,Danger,hover,pressed,Enabled);
             Color foreground = !Enabled ? UiTheme.Muted : Accent ? (UiTheme.Dark ? Color.FromArgb(14,33,42) : Color.White) : Danger ? Color.White : UiTheme.TextColor;
             Rectangle textRect = ClientRectangle;
             if (!String.IsNullOrEmpty(IconKind))
             {
+                float s = UiTheme.DpiScaleOf(this);
+                int iconSize = UiTheme.S(16, s), gap = UiTheme.S(6, s), pad = UiTheme.S(12, s);
                 Size textSize = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
-                int groupWidth = 16 + 6 + textSize.Width;
-                int iconLeft = CenterIconGroup ? Math.Max(12, (Width - groupWidth) / 2) : 12;
-                UiSymbols.Action(e.Graphics, IconKind, new Rectangle(iconLeft, (Height - 16) / 2, 16, 16), foreground);
-                textRect = new Rectangle(iconLeft + 22, 0, Math.Max(1, Width - iconLeft - 28), Height);
-                TextRenderer.DrawText(e.Graphics,Text,Font,textRect,foreground,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                int groupWidth = iconSize + gap + textSize.Width;
+                int iconLeft = CenterIconGroup ? Math.Max(pad, (Width - groupWidth) / 2) : pad;
+                UiSymbols.Action(e.Graphics, IconKind, new Rectangle(iconLeft, (Height - iconSize) / 2, iconSize, iconSize), foreground);
+                textRect = new Rectangle(iconLeft + iconSize + gap, 0, Math.Max(1, Width - iconLeft - iconSize - gap - gap), Height);
+                UiTheme.DrawText(this,e.Graphics,Text,Font,textRect,foreground,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             }
-            else TextRenderer.DrawText(e.Graphics,Text,Font,textRect,foreground,TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            else UiTheme.DrawText(this,e.Graphics,Text,Font,textRect,foreground,TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             if(Focused && ShowFocusCues && UiInput.Keyboard) UiTheme.Focus(e.Graphics,ClientRectangle);
         }
         internal Rectangle IconBounds()
         {
             if (String.IsNullOrEmpty(IconKind)) return Rectangle.Empty;
+            float s = UiTheme.DpiScaleOf(this);
+            int iconSize = UiTheme.S(16, s), gap = UiTheme.S(6, s), pad = UiTheme.S(12, s);
             Size textSize = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
-            int groupWidth = 16 + 6 + textSize.Width;
-            int iconLeft = CenterIconGroup ? Math.Max(12, (Width - groupWidth) / 2) : 12;
-            return new Rectangle(iconLeft, (Height - 16) / 2, 16, 16);
+            int groupWidth = iconSize + gap + textSize.Width;
+            int iconLeft = CenterIconGroup ? Math.Max(pad, (Width - groupWidth) / 2) : pad;
+            return new Rectangle(iconLeft, (Height - iconSize) / 2, iconSize, iconSize);
         }
         internal Rectangle TextBounds()
         {
@@ -1073,11 +1526,14 @@ namespace QuotaTrayApp
         protected override void OnCheckedChanged(EventArgs e) { Invalidate(); base.OnCheckedChanged(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(BackColor);
-            UiTheme.Material(e.Graphics, ClientRectangle, BackColor, false, false, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, BackColor);
+            if (UiTheme.IsGlass(this) && !UiTheme.Dark)
+                UiTheme.LightGlassMaterial(e.Graphics, ClientRectangle, false, false, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
+            else
+                UiTheme.Material(e.Graphics, ClientRectangle, BackColor, false, false, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
             Rectangle text = ClientRectangle;
             text.Inflate(-8, 0);
-            TextRenderer.DrawText(e.Graphics, Text, Font, text, Enabled ? UiTheme.TextColor : UiTheme.Muted,
+            UiTheme.DrawText(this, e.Graphics, Text, Font, text, Enabled ? UiTheme.TextColor : UiTheme.Muted,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             if (Focused && ShowFocusCues && UiInput.Keyboard) UiTheme.Focus(e.Graphics, ClientRectangle);
         }
@@ -1092,10 +1548,34 @@ namespace QuotaTrayApp
         protected override void OnCheckedChanged(EventArgs e) { Invalidate(); base.OnCheckedChanged(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Parent.BackColor);
-            if(Checked || hover) UiTheme.Fill(e.Graphics,ClientRectangle,Checked ? UiTheme.Selection : UiTheme.Input,null);
-            UiSymbols.Navigation(e.Graphics,Name,new Rectangle(9,(Height-16)/2,16,16),Checked ? UiTheme.Accent : UiTheme.Muted);
-            TextRenderer.DrawText(e.Graphics,Text,Font,new Rectangle(30,0,Width-36,Height),Checked ? UiTheme.Accent : UiTheme.TextColor,
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+            bool lightGlass = UiTheme.IsGlass(this) && !UiTheme.Dark;
+            if(Checked || hover)
+            {
+                if (lightGlass)
+                {
+                    if (Checked)
+                        UiTheme.PaintGlassSurface(e.Graphics, ClientRectangle,
+                            Color.FromArgb(hover ? 136 : 114, 198, 229, 215),
+                            Color.FromArgb(hover ? 112 : 90, 174, 214, 196),
+                            Color.FromArgb(105, 12, 84, 64));
+                    else
+                        UiTheme.PaintGlassSurface(e.Graphics, ClientRectangle,
+                            Color.FromArgb(28, 15, 23, 42), Color.FromArgb(42, 15, 23, 42),
+                            Color.FromArgb(52, 15, 23, 42));
+                }
+                else
+                {
+                    Color pill = Checked ? UiTheme.Selection : UiTheme.Input;
+                    if (UiTheme.IsGlass(this)) pill = Color.FromArgb(Checked ? 215 : 175, pill);
+                    UiTheme.Fill(e.Graphics,ClientRectangle,pill,null);
+                }
+            }
+            Color iconColor = Checked ? UiTheme.Accent : (lightGlass ? Color.FromArgb(24, 32, 42) : UiTheme.Muted);
+            float s = UiTheme.DpiScaleOf(this);
+            int iconLeft = UiTheme.S(9, s), iconSize = UiTheme.S(16, s), textLeft = UiTheme.S(30, s);
+            UiSymbols.Navigation(e.Graphics,Name,new Rectangle(iconLeft,(Height-iconSize)/2,iconSize,iconSize),iconColor);
+            UiTheme.DrawText(this,e.Graphics,Text,Font,new Rectangle(textLeft,0,Width-textLeft-UiTheme.S(6, s),Height),Checked ? UiTheme.Accent : UiTheme.TextColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
             if(Focused && ShowFocusCues && UiInput.Keyboard) UiTheme.Focus(e.Graphics,ClientRectangle);
         }
@@ -1109,25 +1589,27 @@ namespace QuotaTrayApp
             SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer,true);
             timer.Interval=15;timer.Tick+=delegate {float t=Math.Min(1,(float)(DateTime.UtcNow-start).TotalMilliseconds/180);position=from+(to-from)*(1-(float)Math.Pow(1-t,3));Invalidate();if(t>=1)timer.Stop();};
         }
-        public override Size GetPreferredSize(Size proposedSize){Size s=TextRenderer.MeasureText(Text,Font);return new Size(s.Width+54,Math.Max(29,s.Height+7));}
+        public override Size GetPreferredSize(Size proposedSize){Size sz=TextRenderer.MeasureText(Text,Font); float s=UiTheme.DpiScaleOf(this); return new Size(sz.Width+UiTheme.S(54,s),Math.Max(UiTheme.S(29,s),sz.Height+UiTheme.S(7,s)));}
         protected override void OnCheckedChanged(EventArgs e)
         {
             from=position;to=Checked?1:0;start=DateTime.UtcNow;if(IsHandleCreated)timer.Start();else position=to;base.OnCheckedChanged(e);Invalidate();
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Parent.BackColor);e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
-            Rectangle track=new Rectangle(3,(Height-20)/2,36,20);
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
+            float s=UiTheme.DpiScaleOf(this);
+            int tw=UiTheme.S(36,s), th=UiTheme.S(20,s), pad=UiTheme.S(3,s), ks=UiTheme.S(14,s), textLeft=UiTheme.S(48,s);
+            Rectangle track=new Rectangle(pad,(Height-th)/2,tw,th);
             Color off=UiTheme.Blend(BackColor,UiTheme.Dark?Color.White:Color.Black,UiTheme.Dark?47:64);
             Color on=UiTheme.Blend(BackColor,UiTheme.AccountColor(Tag as string),210);
             if(!Enabled) { off=UiTheme.Blend(BackColor,UiTheme.Dark?Color.White:Color.Black,25); on=UiTheme.Blend(BackColor,UiTheme.AccountColor(Tag as string),105); }
             Color fill=UiTheme.Blend(off,on,(int)(position*255));
-            using(GraphicsPath path=UiTheme.Round(track,10))using(LinearGradientBrush brush=new LinearGradientBrush(track,ControlPaint.Light(fill,.12f),fill,90))
+            using(GraphicsPath path=UiTheme.Round(track,th/2f))using(LinearGradientBrush brush=new LinearGradientBrush(track,ControlPaint.Light(fill,.12f),fill,90))
             {e.Graphics.FillPath(brush,path);using(Pen edge=new Pen(UiTheme.Border,1))e.Graphics.DrawPath(edge,path);}
-            Rectangle knob=new Rectangle(track.Left+3+(int)Math.Round(position*16),track.Top+3,14,14);
+            Rectangle knob=new Rectangle(track.Left+pad+(int)Math.Round(position*Math.Max(1,tw-ks-pad*2)),track.Top+pad,ks,ks);
             using(Brush shadow=new SolidBrush(Color.FromArgb(60,0,0,0)))e.Graphics.FillEllipse(shadow,knob.X,knob.Y+1,knob.Width,knob.Height);
             using(LinearGradientBrush brush=new LinearGradientBrush(knob,Color.White,Color.FromArgb(219,224,229),90))e.Graphics.FillEllipse(brush,knob);
-            TextRenderer.DrawText(e.Graphics,Text,Font,new Rectangle(48,0,Width-48,Height),Enabled?UiTheme.TextColor:UiTheme.Muted,TextFormatFlags.Left|TextFormatFlags.VerticalCenter);
+            UiTheme.DrawText(this,e.Graphics,Text,Font,new Rectangle(textLeft,0,Width-textLeft,Height),Enabled?UiTheme.TextColor:UiTheme.Muted,TextFormatFlags.Left|TextFormatFlags.VerticalCenter|TextFormatFlags.SingleLine);
             if(Focused&&UiInput.Keyboard)UiTheme.Focus(e.Graphics,ClientRectangle);
         }
         protected override void Dispose(bool disposing){if(disposing)timer.Dispose();base.Dispose(disposing);}
@@ -1136,10 +1618,13 @@ namespace QuotaTrayApp
     {
         private WindowInfo quota;
         private string title, reset;
+        private Font largeFont;
+        private FontFamily largeFontFamily;
         internal static bool Valid(WindowInfo w) { return w!=null && !Double.IsNaN(w.used) && !Double.IsInfinity(w.used) && w.used>=0 && w.used<=100 && w.windowMins>0; }
         internal QuotaMeter(WindowInfo quota,string title)
         {
-            Name="quota-meter"; Size=new Size(420,92); Margin=new Padding(0);
+            float s=UiTheme.SystemDpiScale();
+            Name="quota-meter"; Size=new Size(UiTheme.S(420,s),UiTheme.S(92,s)); Margin=new Padding(0);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw,true);
             AccessibleRole = AccessibleRole.Graphic;
             UpdateQuota(quota, title);
@@ -1151,21 +1636,33 @@ namespace QuotaTrayApp
             string nextReset = window == null ? L.T("暂无") : TrayContext.MultiTooltipCountdown(window.resetsAt);
             if (title == label && reset == nextReset && (quota == null ? window == null : window != null && quota.used == window.used)) return;
             quota = window; title = label; reset = nextReset;
-            Text = title + " · " + (quota == null ? L.T("暂无") : L.F("剩余 {0}%", Math.Max(0, 100 - (int)Math.Round(quota.used))));
+            Text = title + " · " + (quota == null ? L.T("暂无") : L.F("剩余 {0}%", QuotaWindow.Remaining(quota.used)));
             AccessibleName = Text;
             Invalidate();
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Parent == null ? UiTheme.Surface : Parent.BackColor);
-            double remaining=quota==null ? 0 : Math.Max(0,Math.Min(100,100-quota.used));
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, Parent == null ? UiTheme.Surface : Parent.BackColor);
+            float s=UiTheme.DpiScaleOf(this);
+            int remaining=quota==null ? 0 : QuotaWindow.Remaining(quota.used);
             Color color=quota==null ? UiTheme.Muted : UiTheme.QuotaColor(remaining);
-            TextRenderer.DrawText(e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,20),UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-            string amount=quota==null ? "—" : ((int)Math.Round(remaining))+"%";
-            using(Font large=new Font(Font.FontFamily,22f,FontStyle.Bold)) TextRenderer.DrawText(e.Graphics,amount,large,new Rectangle(0,19,Width,40),UiTheme.TextColor,TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-            Rectangle track=new Rectangle(0,61,Width,5); UiTheme.QuotaGradient(e.Graphics,track,UiTheme.Input);
-            if(quota!=null) { int filled=(int)Math.Round(track.Width*remaining/100); if(filled>1) UiTheme.QuotaGradient(e.Graphics,new Rectangle(track.X,track.Y,filled,track.Height),color); }
-            TextRenderer.DrawText(e.Graphics,reset,Font,new Rectangle(0,69,Width,22),UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            UiTheme.DrawText(this,e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,UiTheme.S(20,s)),UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            string amount=quota==null ? "—" : remaining+"%";
+            if (largeFont == null || !Equals(largeFontFamily, Font.FontFamily))
+            {
+                if (largeFont != null) largeFont.Dispose();
+                largeFontFamily = Font.FontFamily;
+                largeFont = new Font(largeFontFamily, 22f, FontStyle.Bold);
+            }
+            UiTheme.DrawText(this,e.Graphics,amount,largeFont,new Rectangle(0,UiTheme.S(19,s),Width,UiTheme.S(40,s)),UiTheme.TextColor,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            Rectangle track=new Rectangle(0,UiTheme.S(61,s),Width,Math.Max(4,UiTheme.S(5,s))); UiTheme.QuotaGradient(e.Graphics,track,UiTheme.Input);
+            if(quota!=null) { int filled=(int)Math.Round(track.Width*remaining/100.0); if(filled>1) UiTheme.QuotaGradient(e.Graphics,new Rectangle(track.X,track.Y,filled,track.Height),color); }
+            UiTheme.DrawText(this,e.Graphics,reset,Font,new Rectangle(0,UiTheme.S(69,s),Width,UiTheme.S(22,s)),UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && largeFont != null) { largeFont.Dispose(); largeFont = null; largeFontFamily = null; }
+            base.Dispose(disposing);
         }
     }
 }
@@ -1187,46 +1684,49 @@ namespace QuotaTrayApp
     }
     internal static class UiSymbols
     {
+        private static float S(float v, float scale) { return v * scale; }
         internal static void Action(Graphics g, string kind, Rectangle r, Color color)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen p = new Pen(color, 1.6f))
+            float sc = r.Width / 16f;
+            using (Pen p = new Pen(color, Math.Max(1.4f, 1.6f * sc)))
             {
                 if (kind == "shortcut")
                 {
-                    g.DrawRectangle(p, r.X + 1, r.Y + 2, 12, 9);
-                    g.DrawLine(p, r.X + 4, r.Y + 14, r.X + 10, r.Y + 14);
-                    g.DrawLine(p, r.X + 7, r.Y + 11, r.X + 7, r.Y + 14);
-                    g.DrawLine(p, r.X + 10, r.Y + 3, r.X + 14, r.Y + 3);
-                    g.DrawLine(p, r.X + 14, r.Y + 3, r.X + 14, r.Y + 7);
-                    g.DrawLine(p, r.X + 14, r.Y + 3, r.X + 10, r.Y + 7);
+                    g.DrawRectangle(p, r.X + S(1, sc), r.Y + S(2, sc), S(12, sc), S(9, sc));
+                    g.DrawLine(p, r.X + S(4, sc), r.Y + S(14, sc), r.X + S(10, sc), r.Y + S(14, sc));
+                    g.DrawLine(p, r.X + S(7, sc), r.Y + S(11, sc), r.X + S(7, sc), r.Y + S(14, sc));
+                    g.DrawLine(p, r.X + S(10, sc), r.Y + S(3, sc), r.X + S(14, sc), r.Y + S(3, sc));
+                    g.DrawLine(p, r.X + S(14, sc), r.Y + S(3, sc), r.X + S(14, sc), r.Y + S(7, sc));
+                    g.DrawLine(p, r.X + S(14, sc), r.Y + S(3, sc), r.X + S(10, sc), r.Y + S(7, sc));
                 }
                 else if (kind == "codex")
                 {
-                    g.DrawRectangle(p, r.X + 1, r.Y + 1, 13, 13);
-                    g.DrawLine(p, r.X + 4, r.Y + 7, r.X + 6, r.Y + 9);
-                    g.DrawLine(p, r.X + 6, r.Y + 9, r.X + 10, r.Y + 5);
+                    g.DrawRectangle(p, r.X + S(1, sc), r.Y + S(1, sc), S(13, sc), S(13, sc));
+                    g.DrawLine(p, r.X + S(4, sc), r.Y + S(7, sc), r.X + S(6, sc), r.Y + S(9, sc));
+                    g.DrawLine(p, r.X + S(6, sc), r.Y + S(9, sc), r.X + S(10, sc), r.Y + S(5, sc));
                 }
                 else
                 {
-                    g.DrawRectangle(p, r.X + 5, r.Y + 1, 9, 13);
-                    g.DrawLine(p, r.X + 1, r.Y + 8, r.X + 9, r.Y + 8);
-                    g.DrawLine(p, r.X + 6, r.Y + 5, r.X + 9, r.Y + 8);
-                    g.DrawLine(p, r.X + 6, r.Y + 11, r.X + 9, r.Y + 8);
+                    g.DrawRectangle(p, r.X + S(5, sc), r.Y + S(1, sc), S(9, sc), S(13, sc));
+                    g.DrawLine(p, r.X + S(1, sc), r.Y + S(8, sc), r.X + S(9, sc), r.Y + S(8, sc));
+                    g.DrawLine(p, r.X + S(6, sc), r.Y + S(5, sc), r.X + S(9, sc), r.Y + S(8, sc));
+                    g.DrawLine(p, r.X + S(6, sc), r.Y + S(11, sc), r.X + S(9, sc), r.Y + S(8, sc));
                 }
             }
         }
         internal static void Navigation(Graphics g,string name,Rectangle r,Color color)
         {
             g.SmoothingMode=SmoothingMode.AntiAlias;
-            using(Pen p=new Pen(color,1.6f))
+            float sc = r.Width / 16f;
+            using(Pen p=new Pen(color, Math.Max(1.4f, 1.6f * sc)))
             {
                 float x=r.X,y=r.Y,w=r.Width;
-                if(name.Contains("accounts")) { g.DrawEllipse(p,x+4,y+1,8,8); g.DrawArc(p,x+1,y+9,14,9,180,180); }
-                else if(name.Contains("display")) { g.DrawRectangle(p,x+1,y+2,w-2,10); g.DrawLine(p,x+8,y+12,x+8,y+15); g.DrawLine(p,x+4,y+15,x+12,y+15); }
-                else if(name.Contains("notifications")) { g.DrawArc(p,x+4,y+1,8,10,180,180); g.DrawLine(p,x+4,y+6,x+2,y+12); g.DrawLine(p,x+12,y+6,x+14,y+12); g.DrawLine(p,x+2,y+12,x+14,y+12); g.DrawArc(p,x+6,y+12,4,4,0,180); }
-                else if(name.Contains("refresh")) { g.DrawArc(p,x+2,y+2,12,12,30,290); g.DrawLines(p,new PointF[] {new PointF(x+11,y),new PointF(x+14,y+4),new PointF(x+9,y+4)}); }
-                else { g.DrawEllipse(p,x+3,y+3,10,10); g.DrawEllipse(p,x+6,y+6,4,4); for(int i=0;i<8;i++) { double a=i*Math.PI/4;g.DrawLine(p,x+8+(float)Math.Cos(a)*6,y+8+(float)Math.Sin(a)*6,x+8+(float)Math.Cos(a)*8,y+8+(float)Math.Sin(a)*8); } }
+                if(name.Contains("accounts")) { g.DrawEllipse(p,x+S(4,sc),y+S(1,sc),S(8,sc),S(8,sc)); g.DrawArc(p,x+S(1,sc),y+S(9,sc),S(14,sc),S(9,sc),180,180); }
+                else if(name.Contains("display")) { g.DrawRectangle(p,x+S(1,sc),y+S(2,sc),w-S(2,sc),S(10,sc)); g.DrawLine(p,x+S(8,sc),y+S(12,sc),x+S(8,sc),y+S(15,sc)); g.DrawLine(p,x+S(4,sc),y+S(15,sc),x+S(12,sc),y+S(15,sc)); }
+                else if(name.Contains("notifications")) { g.DrawArc(p,x+S(4,sc),y+S(1,sc),S(8,sc),S(10,sc),180,180); g.DrawLine(p,x+S(4,sc),y+S(6,sc),x+S(2,sc),y+S(12,sc)); g.DrawLine(p,x+S(12,sc),y+S(6,sc),x+S(14,sc),y+S(12,sc)); g.DrawLine(p,x+S(2,sc),y+S(12,sc),x+S(14,sc),y+S(12,sc)); g.DrawArc(p,x+S(6,sc),y+S(12,sc),S(4,sc),S(4,sc),0,180); }
+                else if(name.Contains("refresh")) { g.DrawArc(p,x+S(2,sc),y+S(2,sc),S(12,sc),S(12,sc),30,290); g.DrawLines(p,new PointF[] {new PointF(x+S(11,sc),y),new PointF(x+S(14,sc),y+S(4,sc)),new PointF(x+S(9,sc),y+S(4,sc))}); }
+                else { g.DrawEllipse(p,x+S(3,sc),y+S(3,sc),S(10,sc),S(10,sc)); g.DrawEllipse(p,x+S(6,sc),y+S(6,sc),S(4,sc),S(4,sc)); for(int i=0;i<8;i++) { double a=i*Math.PI/4;g.DrawLine(p,x+S(8,sc)+(float)Math.Cos(a)*S(6,sc),y+S(8,sc)+(float)Math.Sin(a)*S(6,sc),x+S(8,sc)+(float)Math.Cos(a)*S(8,sc),y+S(8,sc)+(float)Math.Sin(a)*S(8,sc)); } }
             }
         }
     }
@@ -1235,8 +1735,12 @@ namespace QuotaTrayApp
         internal const int CaptionHeight=42;
         internal readonly UiTitleBar TitleBar;
         internal string TitlePrimary, TitleSecondary;
+        internal readonly float UiScale;
+        internal int S(int px) { return UiTheme.S(px, UiScale); }
+        internal int ScaledCaptionHeight { get { return S(CaptionHeight); } }
 
         internal bool CanResize = true;
+        internal bool GlassEnabled { get; private set; }
         private bool localCorners;
         private UiCornerEdges cornerEdges;
         [StructLayout(LayoutKind.Sequential)] private struct PointNative { public int X,Y; }
@@ -1245,17 +1749,28 @@ namespace QuotaTrayApp
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr hwnd,int msg,IntPtr w,IntPtr l);
         internal UiWindow()
         {
+            UiScale = UiTheme.SystemDpiScale();
             FormBorderStyle=FormBorderStyle.None;
             UiInput.Install(); SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw,true);
-            AutoScaleDimensions=new SizeF(96,96); AutoScaleMode=AutoScaleMode.Dpi;
-            Padding=new Padding(0,CaptionHeight,0,0);
+            AutoScaleMode=AutoScaleMode.None;
+            Padding=new Padding(0,ScaledCaptionHeight,0,0);
             try { Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { Icon=SystemIcons.Application; }
             TitleBar=new UiTitleBar(this); TitleBar.Name="window-title"; Controls.Add(TitleBar);
-            SizeChanged+=delegate { TitleBar.SetBounds(0,0,ClientSize.Width,CaptionHeight); TitleBar.BringToFront(); };
+            SizeChanged+=delegate { TitleBar.SetBounds(0,0,ClientSize.Width,ScaledCaptionHeight); TitleBar.BringToFront(); };
             TextChanged+=delegate { TitleBar.Invalidate(); };
         }
         protected override CreateParams CreateParams { get { CreateParams p=base.CreateParams; p.Style |= 0x00040000; return p; } }
-        protected override void OnShown(EventArgs e) { TitleBar.SetBounds(0,0,ClientSize.Width,CaptionHeight); TitleBar.BringToFront(); base.OnShown(e); }
+        protected override void OnShown(EventArgs e) { TitleBar.SetBounds(0,0,ClientSize.Width,ScaledCaptionHeight); TitleBar.BringToFront(); base.OnShown(e); }
+        internal void ApplyGlass(bool enabled)
+        {
+            GlassEnabled = enabled;
+            if (IsHandleCreated) UiTheme.SetAcrylic(Handle, enabled);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (GlassEnabled) UiTheme.PaintSplitGlass(this, e.Graphics, ClientSize.Width, ClientSize.Height);
+            else base.OnPaintBackground(e);
+        }
         internal void UseLocalCorners(bool enabled)
         {
             if (!enabled && !localCorners) return;
@@ -1326,8 +1841,9 @@ namespace QuotaTrayApp
             base.WndProc(ref m);
             if(m.Msg==0x84 && WindowState==FormWindowState.Normal && CanResize)
             {
+                int grip = S(6);
                 long value=m.LParam.ToInt64(); Point point=PointToClient(new Point((short)(value & 0xffff),(short)((value>>16)&0xffff)));
-                bool left=point.X<6,right=point.X>=ClientSize.Width-6,top=point.Y<6,bottom=point.Y>=ClientSize.Height-6;
+                bool left=point.X<grip,right=point.X>=ClientSize.Width-grip,top=point.Y<grip,bottom=point.Y>=ClientSize.Height-grip;
                 if(top) m.Result=new IntPtr(left?13:right?14:12); else if(bottom)m.Result=new IntPtr(left?16:right?17:15); else if(left)m.Result=new IntPtr(10); else if(right)m.Result=new IntPtr(11);
             }
         }
@@ -1425,6 +1941,11 @@ namespace QuotaTrayApp
     {
         private readonly UiWindow window;
         private readonly UiCaption minimize,maximize,close;
+        private Bitmap brandIcon;
+        private int brandIconSize;
+        private Font mainFont, subFont;
+        private FontFamily cachedFamily;
+        private bool cachedHasSecondary;
         internal UiTitleBar(UiWindow window)
         {
             this.window=window; TabStop=false; SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw,true);
@@ -1438,42 +1959,53 @@ namespace QuotaTrayApp
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e); if(close==null)return;
-            close.SetBounds(Width-46,0,46,Height);maximize.SetBounds(Width-92,0,46,Height);minimize.SetBounds(Width-138,0,46,Height);
+            int w = window.S(46);
+            close.SetBounds(Width-w,0,w,Height);maximize.SetBounds(Width-w*2,0,w,Height);minimize.SetBounds(Width-w*3,0,w,Height);
             maximize.Visible=window.MaximizeBox; minimize.Visible=window.MinimizeBox;
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(UiTheme.Background);
+            UiTheme.PaintSplitGlass(window, e.Graphics, Width, Height);
             Control sidebar = window.Controls["sidebar"];
-            if (sidebar != null)
-                using (Brush fill = new SolidBrush(UiTheme.Sidebar)) e.Graphics.FillRectangle(fill, 0, 0, sidebar.Right, Height);
             if(window.Icon!=null)
             {
-                e.Graphics.InterpolationMode=InterpolationMode.HighQualityBicubic; e.Graphics.PixelOffsetMode=PixelOffsetMode.HighQuality;
-                using(Bitmap icon=Bitmap.FromHicon(window.Icon.Handle)) e.Graphics.DrawImage(icon,new Rectangle(15,(Height-18)/2,18,18));
+                int iconSize = window.S(18);
+                if (brandIcon == null || brandIconSize != iconSize)
+                {
+                    if (brandIcon != null) brandIcon.Dispose();
+                    brandIcon = TrayContext.RenderGauge(iconSize, 0, 0, true);
+                    brandIconSize = iconSize;
+                }
+                e.Graphics.DrawImageUnscaled(brandIcon, window.S(15), (Height - iconSize) / 2);
             }
             string primary=String.IsNullOrEmpty(window.TitlePrimary)?window.Text:window.TitlePrimary;
             string secondary=window.TitleSecondary;
-            using(Font main=new Font(window.Font.FontFamily, String.IsNullOrEmpty(secondary) ? 10.5f : 9.3f, FontStyle.Bold))
-            using(Font sub=new Font(window.Font.FontFamily, 8.0f, FontStyle.Regular))
+            bool hasSecondary = !String.IsNullOrEmpty(secondary);
+            if (mainFont == null || !Equals(cachedFamily, window.Font.FontFamily) || cachedHasSecondary != hasSecondary)
             {
-                const TextFormatFlags measureFlags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-                const TextFormatFlags drawFlags = measureFlags | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
-                Size unconstrained = new Size(Int32.MaxValue, Int32.MaxValue);
-                Size mainSize = TextRenderer.MeasureText(e.Graphics, primary, main, unconstrained, measureFlags);
-                Size subSize = String.IsNullOrEmpty(secondary) ? Size.Empty : TextRenderer.MeasureText(e.Graphics, secondary, sub, unconstrained, measureFlags);
-                Rectangle mainBounds, subBounds;
-                int captionStart = minimize.Visible ? minimize.Left : maximize.Visible ? maximize.Left : close.Left;
-                PlaceTitle(mainSize, subSize, Height, Math.Min(captionStart, sidebar == null ? Width : sidebar.Right) - 12, out mainBounds, out subBounds);
-                TextRenderer.DrawText(e.Graphics, primary, main, mainBounds, UiTheme.TextColor, drawFlags);
-                if (!subBounds.IsEmpty)
-                    TextRenderer.DrawText(e.Graphics, secondary, sub, subBounds, UiTheme.Muted, drawFlags);
+                if (mainFont != null) mainFont.Dispose();
+                if (subFont != null) subFont.Dispose();
+                cachedFamily = window.Font.FontFamily;
+                cachedHasSecondary = hasSecondary;
+                mainFont = new Font(cachedFamily, hasSecondary ? 9.3f : 10.5f, FontStyle.Bold);
+                subFont = new Font(cachedFamily, 8.0f, FontStyle.Regular);
             }
+            const TextFormatFlags measureFlags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+            const TextFormatFlags drawFlags = measureFlags | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
+            Size unconstrained = new Size(Int32.MaxValue, Int32.MaxValue);
+            Size mainSize = TextRenderer.MeasureText(e.Graphics, primary, mainFont, unconstrained, measureFlags);
+            Size subSize = hasSecondary ? TextRenderer.MeasureText(e.Graphics, secondary, subFont, unconstrained, measureFlags) : Size.Empty;
+            Rectangle mainBounds, subBounds;
+            int captionStart = minimize.Visible ? minimize.Left : maximize.Visible ? maximize.Left : close.Left;
+            PlaceTitle(mainSize, subSize, Height, Math.Min(captionStart, sidebar == null ? Width : sidebar.Right) - window.S(12), out mainBounds, out subBounds, window.UiScale);
+            UiTheme.DrawText(this, e.Graphics, primary, mainFont, mainBounds, UiTheme.TextColor, drawFlags);
+            if (!subBounds.IsEmpty)
+                UiTheme.DrawText(this, e.Graphics, secondary, subFont, subBounds, UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted, drawFlags);
         }
 
-        internal static void PlaceTitle(Size primary, Size secondary, int height, int right, out Rectangle main, out Rectangle sub)
+        internal static void PlaceTitle(Size primary, Size secondary, int height, int right, out Rectangle main, out Rectangle sub, float scale = 1f)
         {
-            const int left = 42, gap = 8;
+            int left = UiTheme.S(42, scale), gap = UiTheme.S(8, scale);
             int width = Math.Max(1, right - left);
             sub = Rectangle.Empty;
             if (secondary.IsEmpty || primary.Width + gap + secondary.Width <= width)
@@ -1482,11 +2014,22 @@ namespace QuotaTrayApp
                 if (!secondary.IsEmpty) sub = new Rectangle(left + primary.Width + gap, 0, width - primary.Width - gap, height);
                 return;
             }
-            const int padding = 5;
+            int padding = UiTheme.S(5, scale);
             int top = Math.Max(padding, (height - primary.Height - secondary.Height) / 2);
             int bottom = Math.Max(top, height - padding);
             main = new Rectangle(left, top, width, Math.Min(primary.Height, Math.Max(0, bottom - top - secondary.Height)));
             sub = new Rectangle(left, main.Bottom, width, Math.Min(secondary.Height, bottom - main.Bottom));
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (brandIcon != null) { brandIcon.Dispose(); brandIcon = null; }
+                if (mainFont != null) { mainFont.Dispose(); mainFont = null; }
+                if (subFont != null) { subFont.Dispose(); subFont = null; }
+                cachedFamily = null;
+            }
+            base.Dispose(disposing);
         }
     }
     internal sealed class UiCaption : Control
@@ -1502,10 +2045,33 @@ namespace QuotaTrayApp
         protected override void OnClick(EventArgs e){action();base.OnClick(e);}
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(hover ? kind=="close" ? Color.FromArgb(176,57,74) : UiTheme.Input : UiTheme.Background);
-            int x=Width/2,y=Height/2;
-            using(Pen p=new Pen(hover && kind=="close"?Color.White:UiTheme.TextColor,1))
-            { if(kind=="minimize")e.Graphics.DrawLine(p,x-5,y,x+5,y);else if(kind=="maximize")e.Graphics.DrawRectangle(p,x-4,y-4,8,8);else {e.Graphics.DrawLine(p,x-4,y-4,x+4,y+4);e.Graphics.DrawLine(p,x+4,y-4,x-4,y+4);} }
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, UiTheme.Background);
+            bool isClose = kind == "close";
+            float s = UiTheme.DpiScaleOf(this);
+            // Hover mask: an inset rounded rectangle that nests inside the window's
+            // own corner instead of the old full-height square.
+            int inset = UiTheme.S(3, s);
+            RectangleF mask = new RectangleF(inset, inset, Math.Max(1, Width - inset * 2), Math.Max(1, Height - inset * 2));
+            float radius = UiTheme.Radius;
+            float topRight = isClose ? Math.Max(2f, UiTheme.WindowRadius - inset) : radius;
+            if (hover)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Color maskFill = isClose
+                    ? Color.FromArgb(186, 46, 62)
+                    : (UiTheme.IsGlass(this) && !UiTheme.Dark ? Color.FromArgb(34, 15, 23, 42) : UiTheme.Input);
+                using (GraphicsPath path = UiTheme.RoundCorners(mask, radius, topRight, radius, radius))
+                using (Brush fill = new SolidBrush(maskFill))
+                    e.Graphics.FillPath(fill, path);
+            }
+            int x = Width / 2, y = Height / 2;
+            int minArm = UiTheme.S(5, s), arm = UiTheme.S(4, s);
+            using (Pen p = new Pen(hover && isClose ? Color.White : UiTheme.TextColor, 1))
+            {
+                if (kind == "minimize") e.Graphics.DrawLine(p, x - minArm, y, x + minArm, y);
+                else if (kind == "maximize") e.Graphics.DrawRectangle(p, x - arm, y - arm, arm * 2, arm * 2);
+                else { e.Graphics.DrawLine(p, x - arm, y - arm, x + arm, y + arm); e.Graphics.DrawLine(p, x + arm, y - arm, x - arm, y + arm); }
+            }
         }
     }
     internal sealed class UiComboBox : Control
@@ -1520,8 +2086,9 @@ namespace QuotaTrayApp
         }
         internal UiComboBox()
         {
+            float s=UiTheme.SystemDpiScale();
             SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer|ControlStyles.Selectable|ControlStyles.ResizeRedraw,true);
-            Size=new Size(184,33);Margin=new Padding(0,0,0,10);TabStop=true;AccessibleRole=AccessibleRole.ComboBox;Cursor=Cursors.Hand;
+            Size=new Size(UiTheme.S(184,s),UiTheme.S(33,s));Margin=new Padding(0,0,0,UiTheme.S(10,s));TabStop=true;AccessibleRole=AccessibleRole.ComboBox;Cursor=Cursors.Hand;
         }
         protected override bool IsInputKey(Keys keyData) {Keys k=keyData&Keys.KeyCode;return k==Keys.Up||k==Keys.Down||k==Keys.Home||k==Keys.End||base.IsInputKey(keyData);}
         protected override void OnMouseEnter(EventArgs e){hover=true;Invalidate();base.OnMouseEnter(e);}
@@ -1552,11 +2119,18 @@ namespace QuotaTrayApp
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(Parent==null?UiTheme.Surface:Parent.BackColor);
-            UiTheme.Material(e.Graphics,ClientRectangle,BackColor,false,false,hover,false,Enabled);
-            TextRenderer.DrawText(e.Graphics,Text,Font,new Rectangle(12,0,Width-42,Height),Enabled?UiTheme.TextColor:UiTheme.Muted,TextFormatFlags.Left|TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis);
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, Parent==null?UiTheme.Surface:Parent.BackColor);
+            bool lightGlass = UiTheme.IsGlass(this) && !UiTheme.Dark;
+            if (lightGlass)
+                UiTheme.LightGlassMaterial(e.Graphics, ClientRectangle, false, false, hover, false, Enabled);
+            else
+                UiTheme.Material(e.Graphics,ClientRectangle,BackColor,false,false,hover,false,Enabled);
+            float s = UiTheme.DpiScaleOf(this);
+            UiTheme.DrawText(this,e.Graphics,Text,Font,new Rectangle(UiTheme.S(12,s),0,Width-UiTheme.S(42,s),Height),Enabled?UiTheme.TextColor:UiTheme.Muted,TextFormatFlags.Left|TextFormatFlags.VerticalCenter|TextFormatFlags.SingleLine|TextFormatFlags.EndEllipsis);
             e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
-            using(Pen p=new Pen(UiTheme.Muted,1.2f))e.Graphics.DrawLines(p,new Point[] {new Point(Width-23,Height/2-2),new Point(Width-18,Height/2+3),new Point(Width-13,Height/2-2)});
+            Color arrowColor = !Enabled ? UiTheme.Muted : (lightGlass ? UiTheme.TextColor : UiTheme.Muted);
+            int ax = Width - UiTheme.S(18, s), ay = Height / 2, aw = UiTheme.S(5, s), ah = UiTheme.S(2, s), ab = UiTheme.S(3, s);
+            using(Pen p=new Pen(arrowColor, lightGlass ? 1.4f : 1.2f))e.Graphics.DrawLines(p,new Point[] {new Point(ax-aw,ay-ah),new Point(ax,ay+ab),new Point(ax+aw,ay-ah)});
             if(Focused && UiInput.Keyboard)UiTheme.Focus(e.Graphics,ClientRectangle);
         }
         protected override void Dispose(bool disposing){if(disposing&&popup!=null)popup.Dispose();base.Dispose(disposing);}
@@ -1642,10 +2216,258 @@ namespace QuotaTrayApp
         }
     }
 
+    // 亚克力底：抓取窗口背后的区域，模糊后作为半透明底，和提醒弹窗同一套观感。
+    internal static class UiBackdrop
+    {
+        // The approved tint stays fixed. Dark mode softens only the brightest backdrop values.
+        internal static int TintAlpha = 102;
+        internal static int LightTintAlpha = 138;
+        private const int PopupPadding = 72, PopupDownscale = 12, PopupSigma = 22;
+        private static readonly Color DarkTint = Color.FromArgb(21, 23, 27);
+        private static readonly double[] GaussianWeights = CreateGaussianWeights();
+        private static readonly double[] HighlightScale = CreateHighlightScale();
+        internal static Color PopupTextColor { get { return UiTheme.Dark ? Color.FromArgb(249, 250, 252) : UiTheme.TextColor; } }
+        internal static bool Allowed()
+        {
+            if (SystemInformation.HighContrast || SystemInformation.TerminalServerSession) return false;
+            try
+            {
+                const string key = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+                return !Object.Equals(Microsoft.Win32.Registry.GetValue(key, "EnableTransparency", 1), 0);
+            }
+            catch (System.Security.SecurityException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+        internal static Bitmap Capture(Rectangle screenArea, bool tray)
+        {
+            if (!Allowed() || screenArea.Width < 2 || screenArea.Height < 2) return null;
+            Rectangle area = screenArea;
+            int padding = tray ? PopupPadding : 14;
+            area.Inflate(padding, padding);
+            if (tray) area.Intersect(Screen.FromRectangle(screenArea).Bounds);
+            if (!area.Contains(screenArea)) return null;
+            try
+            {
+                using (var sample = new Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                {
+                    using (Graphics capture = Graphics.FromImage(sample))
+                        capture.CopyFromScreen(area.Location, Point.Empty, area.Size);
+                    return FilterBackdrop(sample, new Rectangle(screenArea.X - area.X, screenArea.Y - area.Y, screenArea.Width, screenArea.Height), tray, UiTheme.Dark);
+                }
+            }
+            catch (System.ComponentModel.Win32Exception) { return null; }
+        }
+
+        internal static Bitmap FilterBackdrop(Bitmap sample, Rectangle crop, bool tray, bool dark)
+        {
+            int step = tray ? PopupDownscale : 8;
+            using (var reduced = new Bitmap(Math.Max(1, sample.Width / step), Math.Max(1, sample.Height / step), PixelFormat.Format24bppRgb))
+            using (var edges = new ImageAttributes())
+            {
+                edges.SetWrapMode(WrapMode.TileFlipXY);
+                using (Graphics down = Graphics.FromImage(reduced))
+                {
+                    down.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                    down.DrawImage(sample, new Rectangle(Point.Empty, reduced.Size), 0, 0, sample.Width, sample.Height, GraphicsUnit.Pixel, edges);
+                }
+                if (tray) BlurReducedBitmap(reduced, dark);
+                var blurred = new Bitmap(crop.Width, crop.Height, PixelFormat.Format24bppRgb);
+                try
+                {
+                    using (Graphics up = Graphics.FromImage(blurred))
+                    {
+                        up.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        up.DrawImage(reduced, new Rectangle(-crop.X, -crop.Y, sample.Width, sample.Height), 0, 0, reduced.Width, reduced.Height, GraphicsUnit.Pixel, edges);
+                    }
+                    return blurred;
+                }
+                catch { blurred.Dispose(); throw; }
+            }
+        }
+
+        private static double[] CreateGaussianWeights()
+        {
+            double sigma = (double)PopupSigma / PopupDownscale;
+            int radius = (int)Math.Ceiling(3 * sigma);
+            var weights = new double[2 * radius + 1];
+            double total = 0;
+            for (int i = -radius; i <= radius; i++)
+                total += weights[i + radius] = Math.Exp(-i * i / (2 * sigma * sigma));
+            for (int i = 0; i < weights.Length; i++) weights[i] /= total;
+            return weights;
+        }
+
+        private static double[] CreateHighlightScale()
+        {
+            const int knee = 114, shoulder = 65;
+            var scale = new double[256];
+            for (int luma = 0; luma < scale.Length; luma++)
+                scale[luma] = luma <= knee ? 1 : (knee + shoulder * (1 - Math.Exp(-(luma - knee) / (double)shoulder))) / luma;
+            return scale;
+        }
+
+        private static void BlurReducedBitmap(Bitmap bitmap, bool softenHighlights)
+        {
+            BitmapData data = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+            try
+            {
+                int stride = data.Stride;
+                var pixels = new byte[stride * bitmap.Height];
+                var temporary = new byte[pixels.Length];
+                Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+                BlurPass(pixels, temporary, bitmap.Width, bitmap.Height, stride, true);
+                BlurPass(temporary, pixels, bitmap.Width, bitmap.Height, stride, false);
+                if (softenHighlights)
+                {
+                    for (int y = 0; y < bitmap.Height; y++)
+                    for (int x = 0; x < bitmap.Width; x++)
+                    {
+                        int index = y * stride + x * 3;
+                        int luma = (21 * pixels[index + 2] + 72 * pixels[index + 1] + 7 * pixels[index] + 50) / 100;
+                        double scale = HighlightScale[luma];
+                        for (int channel = 0; channel < 3; channel++)
+                            pixels[index + channel] = (byte)Math.Round(pixels[index + channel] * scale);
+                    }
+                }
+                Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+            }
+            finally { bitmap.UnlockBits(data); }
+        }
+
+        private static void BlurPass(byte[] source, byte[] target, int width, int height, int stride, bool horizontal)
+        {
+            int radius = GaussianWeights.Length / 2;
+            int size = horizontal ? width : height;
+            var taps = new int[size, GaussianWeights.Length];
+            for (int position = 0; position < size; position++)
+            for (int i = 0; i < GaussianWeights.Length; i++)
+            {
+                int reflected = position + i - radius;
+                while (reflected < 0 || reflected >= size)
+                    reflected = reflected < 0 ? -reflected - 1 : 2 * size - reflected - 1;
+                taps[position, i] = reflected * (horizontal ? 3 : stride);
+            }
+            for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            for (int channel = 0; channel < 3; channel++)
+            {
+                int origin = horizontal ? y * stride : x * 3;
+                int position = horizontal ? x : y;
+                double sum = 0;
+                for (int i = 0; i < GaussianWeights.Length; i++)
+                    sum += source[origin + taps[position, i] + channel] * GaussianWeights[i];
+                target[y * stride + x * 3 + channel] = (byte)Math.Round(sum);
+            }
+        }
+        internal static void Paint(Graphics graphics, RectangleF body, Bitmap backdrop, float radius, Color? tint = null)
+        {
+            if (backdrop == null) return;
+            GraphicsState saved = graphics.Save();
+            using (GraphicsPath shape = UiTheme.Round(body, radius))
+            {
+                graphics.SetClip(shape, CombineMode.Intersect);
+                PaintOverlay(graphics, body, backdrop, tint);
+            }
+            graphics.Restore(saved);
+        }
+
+        internal static void PaintOverlay(Graphics graphics, RectangleF body, Bitmap backdrop, Color? tint = null)
+        {
+            Color color = tint ?? (UiTheme.Dark ? Color.FromArgb(TintAlpha, DarkTint) : Color.FromArgb(LightTintAlpha, 246, 249, 252));
+            graphics.DrawImageUnscaled(backdrop, (int)Math.Round(body.X), (int)Math.Round(body.Y));
+            using (var brush = new SolidBrush(color)) graphics.FillRectangle(brush, body);
+        }
+
+        internal static void DrawGlassEdge(Graphics graphics, RectangleF body, float radius)
+        {
+            using (GraphicsPath outline = UiTheme.Round(body, radius))
+            using (var reflection = new LinearGradientBrush(RectangleF.Inflate(body, 1, 1), Color.FromArgb(164, Color.White),
+                Color.FromArgb(84, Color.Black), LinearGradientMode.Vertical))
+            using (var edge = new Pen(reflection)) graphics.DrawPath(edge, outline);
+        }
+
+        internal static void PaintPopup(Graphics graphics, RectangleF body, Bitmap backdrop, int radius, Func<int, int> scale, int lightShadow, bool tray)
+        {
+            bool sharedDark = tray && UiTheme.Dark;
+            for (int i = sharedDark ? 7 : lightShadow; i >= 1; i--)
+            {
+                RectangleF shadow = body;
+                shadow.Inflate(scale(i), scale(i));
+                shadow.Offset(0, scale(2));
+                using (GraphicsPath path = UiTheme.Round(shadow, radius + i * .6f))
+                using (var brush = new SolidBrush(Color.FromArgb(3 + (7 - i), 0, 0, 0)))
+                    graphics.FillPath(brush, path);
+            }
+            if (backdrop == null) { UiTheme.Fill(graphics, Rectangle.Round(body), UiTheme.Surface, UiTheme.Border); return; }
+            Color? tint = !tray && UiTheme.Dark ? Color.FromArgb(77, 29, 33, 42) : (Color?)null;
+            Paint(graphics, body, backdrop, radius, tint);
+            if (tray) DrawGlassEdge(graphics, RectangleF.Inflate(body, -1, -1), radius - 1);
+            else
+            {
+                Color color = UiTheme.Dark ? UiTheme.Border : Color.FromArgb(185, 168, 178, 190);
+                using (var edge = new Pen(color))
+                using (GraphicsPath outline = UiTheme.Round(body, radius)) graphics.DrawPath(edge, outline);
+            }
+        }
+    }
+
+    // Capture the first backdrop before showing the window. Later frames exclude the window itself.
+    internal sealed class UiLiveBackdrop : IDisposable
+    {
+        private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 40 };
+        private readonly Func<Rectangle> area;
+        private readonly Action repaint;
+        private readonly bool tray;
+        internal Bitmap Frame { get; private set; }
+
+        [DllImport("user32.dll")] private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
+        internal UiLiveBackdrop(Func<Rectangle> area, Action repaint, bool tray = true)
+        {
+            this.area = area;
+            this.repaint = repaint;
+            this.tray = tray;
+            timer.Tick += delegate
+            {
+                Rectangle bounds = this.area();
+                if (bounds.IsEmpty || !Screen.FromRectangle(bounds).Bounds.Contains(bounds)) return;
+                Bitmap next = UiBackdrop.Capture(bounds, this.tray);
+                if (next == null) return;
+                Replace(next);
+                this.repaint();
+            };
+        }
+
+        internal void CaptureInitial(Rectangle bounds) { Replace(UiBackdrop.Capture(bounds, tray)); }
+
+        internal void Start(Form window)
+        {
+            if (!UiBackdrop.Allowed()) return;
+            try { if (!SetWindowDisplayAffinity(window.Handle, 0x11)) return; }
+            catch (EntryPointNotFoundException) { return; }
+            timer.Start();
+        }
+
+        internal void Stop() { timer.Stop(); }
+
+        private void Replace(Bitmap next)
+        {
+            if (Frame != null) Frame.Dispose();
+            Frame = next;
+        }
+
+        public void Dispose()
+        {
+            timer.Dispose();
+            Replace(null);
+        }
+    }
+
     internal sealed class UiPopup : Form
     {
         internal const int Shadow=9, RowHeight=32;
         private readonly string[] labels; private readonly bool menu; private readonly Action<int> choose;
+        private readonly UiLiveBackdrop backdrop;
         private readonly int dangerIndex;
         private readonly string status;
         private readonly System.Windows.Forms.Timer animation=new System.Windows.Forms.Timer();
@@ -1667,6 +2489,7 @@ namespace QuotaTrayApp
             this.labels=labels;this.active=menu ? -1 : Math.Max(0,selected);this.menu=menu;this.choose=choose;
             this.dangerIndex=dangerIndex;
             this.status=status;
+            backdrop = new UiLiveBackdrop(BackdropBounds, delegate { RenderSurface(false); }, menu);
             Font=font; FormBorderStyle=FormBorderStyle.None; ShowInTaskbar=false; TopMost=true; StartPosition=FormStartPosition.Manual;AutoScaleMode=AutoScaleMode.None;
             AccessibleRole=menu?AccessibleRole.MenuPopup:AccessibleRole.List;Text=menu?L.T("设置"):"";
             AccessibleDescription = status;
@@ -1720,6 +2543,7 @@ namespace QuotaTrayApp
                 Rectangle work = Screen.FromRectangle(anchor).WorkingArea;
                 destination = Placement(Size, anchor, work, tray, shadow, ScalePixel(6));
                 Bounds = destination;
+                backdrop.CaptureInitial(BackdropBounds());
                 bool animate = true;
                 SystemParametersInfo(0x1002, 0, out animate, 0);
                 progress = animate ? .01f : 1;
@@ -1727,6 +2551,7 @@ namespace QuotaTrayApp
                 if (owner != null && owner.FindForm() != null) Show(owner.FindForm()); else Show();
                 ready = true;
                 RenderSurface();
+                if (menu) backdrop.Start(this);
                 Activate();
                 if (animate) animation.Start();
                 return anchor;
@@ -1743,6 +2568,8 @@ namespace QuotaTrayApp
             return new Rectangle(shadow + inset, RowTop + index * rowHeight, Width - 2 * (shadow + inset), rowHeight);
         }
 
+        private Rectangle BackdropBounds() { return Rectangle.Inflate(destination, -shadow, -shadow); }
+
         internal Bitmap RenderBitmap()
         {
             Bitmap bitmap=new Bitmap(Width,Height,System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
@@ -1750,21 +2577,14 @@ namespace QuotaTrayApp
             {
                 g.Clear(Color.Transparent);g.SmoothingMode=SmoothingMode.AntiAlias;g.PixelOffsetMode=PixelOffsetMode.HighQuality;
                 Rectangle body = new Rectangle(shadow, shadow, Width - shadow * 2, Height - shadow * 2);
-                for (int i = 7; i >= 1; i--)
-                {
-                    Rectangle outline = body;
-                    outline.Inflate(ScalePixel(i), ScalePixel(i));
-                    outline.Offset(0, ScalePixel(2));
-                    using (GraphicsPath path = UiTheme.Round(outline, ScalePixel(UiTheme.Radius) + i * .6f))
-                    using (Brush brush = new SolidBrush(Color.FromArgb(3 + (7 - i), 0, 0, 0)))
-                        g.FillPath(brush, path);
-                }
-                UiTheme.Fill(g, body, UiTheme.Surface, UiTheme.Border);
+                int radius = ScalePixel(menu && UiTheme.Dark ? UiTheme.WindowRadius : UiTheme.Radius);
+                UiBackdrop.PaintPopup(g, body, backdrop.Frame, radius, ScalePixel, 7, menu);
                 int textInset = ScalePixel(menu ? 36 : 12), trailing = ScalePixel(menu ? 10 : 12);
                 Color dangerInk = UiTheme.Dark ? Color.FromArgb(252, 154, 158) : Color.FromArgb(161, 35, 52);
+                Color mutedInk = UiTheme.Dark ? UiTheme.Muted : Color.FromArgb(66, 76, 88);
                 using (Font textFont = new Font(Font.FontFamily, Font.SizeInPoints * dpi / 72f, FontStyle.Regular, GraphicsUnit.Pixel))
-                using (var foreground = new SolidBrush(UiTheme.TextColor))
-                using (var danger = new SolidBrush(dangerInk))
+                using (var foreground = new SolidBrush(menu ? UiBackdrop.PopupTextColor : UiTheme.TextColor))
+                using (var danger = new SolidBrush(menu && UiTheme.Dark ? UiTheme.QuotaInk(0) : dangerInk))
                 using (var format = new StringFormat(StringFormat.GenericDefault))
                 {
                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -1772,18 +2592,25 @@ namespace QuotaTrayApp
                     format.Trimming = StringTrimming.EllipsisCharacter;
                     format.FormatFlags |= StringFormatFlags.NoWrap;
                     if (StatusHeight > 0)
-                        using (var muted = new SolidBrush(UiTheme.Muted))
+                        using (var muted = new SolidBrush(menu && UiTheme.Dark ? UiBackdrop.PopupTextColor : mutedInk))
                             g.DrawString(status, textFont, muted, new Rectangle(body.Left + ScalePixel(12),
                                 body.Top + ScalePixel(4), body.Width - ScalePixel(24), StatusHeight), format);
                     for (int i = 0; i < labels.Length; i++)
                     {
                         Rectangle row = RowBounds(i);
                         bool isDanger = i == dangerIndex;
-                        if (i == active) UiTheme.Fill(g, row,
-                            isDanger ? UiTheme.Blend(UiTheme.Surface, dangerInk, UiTheme.Dark ? 40 : 24) : UiTheme.Input, null);
+                        if (i == active)
+                        {
+                            Color hoverFill = isDanger
+                                ? Color.FromArgb(UiTheme.Dark ? 190 : 170, UiTheme.Blend(UiTheme.Surface, dangerInk, UiTheme.Dark ? 40 : 24))
+                                : (UiTheme.Dark ? Color.FromArgb(200, UiTheme.Input) : Color.FromArgb(26, 15, 23, 42));
+                            using (GraphicsPath hp = UiTheme.Round(row, ScalePixel(4)))
+                            using (Brush hb = new SolidBrush(hoverFill))
+                                g.FillPath(hb, hp);
+                        }
                         var iconBounds = new Rectangle(row.Left + ScalePixel(10), row.Top + ScalePixel(8), ScalePixel(16), ScalePixel(16));
                         if (isDanger) UiSymbols.Action(g, "exit", iconBounds, dangerInk);
-                        else if (menu) UiSymbols.Navigation(g, i == 0 ? "refresh" : "general", iconBounds, UiTheme.Muted);
+                        else if (menu) UiSymbols.Navigation(g, i == 0 ? "refresh" : "general", iconBounds, mutedInk);
 
                         // Rasterize glyphs at the final position. GDI's memory-DC text can lose
                         // its alpha/metrics when copied into the layered popup on Windows 10.
@@ -1795,10 +2622,10 @@ namespace QuotaTrayApp
             }
             return bitmap;
         }
-        private void RenderSurface()
+        private void RenderSurface(bool countAnimation = true)
         {
             if(!ready || IsDisposed)return;
-            AnimationFrames++;
+            if (countAnimation) AnimationFrames++;
             IntPtr previous = dpiContext == IntPtr.Zero ? IntPtr.Zero : SetThreadDpiAwarenessContext(dpiContext);
             try { PaintLayeredWindow(); }
             finally { if (previous != IntPtr.Zero) SetThreadDpiAwarenessContext(previous); }
@@ -1839,7 +2666,7 @@ namespace QuotaTrayApp
             if(e.KeyCode==Keys.Home)active=0;if(e.KeyCode==Keys.End)active=labels.Length-1;RenderSurface();e.Handled=true;
         }
         protected override void OnDeactivate(EventArgs e){base.OnDeactivate(e);if(ready)Close();}
-        protected override void Dispose(bool disposing){if(disposing)animation.Dispose();base.Dispose(disposing);}
+        protected override void Dispose(bool disposing){if(disposing){animation.Dispose();backdrop.Dispose();}base.Dispose(disposing);}
         protected override AccessibleObject CreateAccessibilityInstance(){return new PopupAccessible(this);}
         private sealed class PopupAccessible : ControlAccessibleObject
         {
@@ -1861,9 +2688,361 @@ namespace QuotaTrayApp
             public override void DoDefaultAction(){popup.active=index;popup.Commit();}
         }
     }
+    internal sealed class QuotaTipLine
+    {
+        internal string Label;      // "5 小时" / "7 天"
+        internal int Remaining;     // 0-100
+        internal string Detail;     // "1 小时 45 分后恢复"
+        internal string QuotaText
+        {
+            get { return Remaining <= 0 ? L.T("已耗尽") : L.F("剩余 {0}%", Remaining); }
+        }
+        internal string Render()
+        {
+            if (Remaining < 0) return String.IsNullOrEmpty(Detail) ? Label : Label + "｜" + Detail;
+            return String.IsNullOrEmpty(Detail) ? Label + " " + QuotaText : Label + " " + QuotaText + "｜" + Detail;
+        }
+    }
+
+    // WinForms registers legacy tray icons, which can display an empty native tooltip.
+    // Version 4 suppresses it by default. Unpack its callbacks for the WinForms window.
+    internal sealed class TrayIconHover : NativeWindow
+    {
+        private const int TrayCallback = 0x800, ContextMenu = 0x7b, MouseMove = 0x200;
+        private const int RightDown = 0x204, RightUp = 0x205, PopupOpen = 0x406;
+        private const uint SetVersion = 4, CustomTooltipVersion = 4;
+        private static readonly int TaskbarCreated = RegisterWindowMessage("TaskbarCreated");
+        private static readonly System.Reflection.BindingFlags IconFields =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        private static readonly System.Reflection.FieldInfo IdField = typeof(NotifyIcon).GetField("id", IconFields);
+        private static readonly System.Reflection.FieldInfo WindowField = typeof(NotifyIcon).GetField("window", IconFields);
+        private readonly NotifyIcon icon;
+        private readonly UiTrayMenu menu;
+        private uint id;
+        private bool useCustom = true;
+        private bool version4;
+        internal bool Enabled { get { return version4 && useCustom; } }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NotifyIconData
+        {
+            public uint Size;
+            public IntPtr Window;
+            public uint Id, Flags, Callback;
+            public IntPtr Icon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Tip;
+            public uint State, StateMask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Info;
+            public uint Version;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string InfoTitle;
+            public uint InfoFlags;
+            public Guid Guid;
+            public IntPtr BalloonIcon;
+        }
+
+        [DllImport("shell32.dll", ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Shell_NotifyIconW(uint command, ref NotifyIconData data);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int RegisterWindowMessage(string name);
+
+        internal TrayIconHover(NotifyIcon icon, UiTrayMenu menu)
+        {
+            this.icon = icon;
+            this.menu = menu;
+        }
+
+        internal static bool TryGetIdentity(NotifyIcon icon, out IntPtr handle, out uint id)
+        {
+            handle = IntPtr.Zero;
+            id = 0;
+            if (icon == null || IdField == null || WindowField == null) return false;
+            var window = WindowField.GetValue(icon) as NativeWindow;
+            if (window == null || window.Handle == IntPtr.Zero) return false;
+            handle = window.Handle;
+            id = Convert.ToUInt32(IdField.GetValue(icon));
+            return true;
+        }
+
+        internal void SetVisible(bool visible)
+        {
+            if (icon.Visible == visible) return;
+            icon.Visible = visible;
+            version4 = false;
+            if (!visible || !useCustom) return;
+            IntPtr window;
+            if (!TryGetIdentity(icon, out window, out id)) return;
+            if (Handle != window) AssignHandle(window);
+            version4 = ApplyVersion(CustomTooltipVersion);
+        }
+
+        internal void Disable()
+        {
+            useCustom = false;
+            if (version4 && ApplyVersion(0)) version4 = false;
+        }
+
+        private bool ApplyVersion(uint version)
+        {
+            var data = new NotifyIconData { Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)), Window = Handle, Id = id, Version = version };
+            return Shell_NotifyIconW(SetVersion, ref data);
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == TrayCallback && version4)
+            {
+                int eventId = (int)(message.LParam.ToInt64() & 0xffff);
+                message.WParam = (IntPtr)id;
+                if (eventId == ContextMenu)
+                {
+                    if (menu.PopupVisible) return;
+                    message.LParam = (IntPtr)RightDown;
+                    base.WndProc(ref message);
+                    eventId = RightUp;
+                }
+                if (eventId == RightUp && menu.PopupVisible) return;
+                if (eventId == PopupOpen) eventId = MouseMove;
+                message.LParam = (IntPtr)eventId;
+            }
+            base.WndProc(ref message);
+            if (message.Msg == TaskbarCreated) version4 = icon.Visible && useCustom && ApplyVersion(CustomTooltipVersion);
+        }
+    }
+
+    internal sealed class UiQuotaTip : Form
+    {
+        private const int Shadow = 9, PadX = 14, PadY = 10, RowHeight = 22, HeaderHeight = 20;
+        private readonly System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
+        private readonly UiLiveBackdrop backdrop;
+        private NotifyIcon anchorIcon;
+        private string header = "";
+        private QuotaTipLine[] lines = new QuotaTipLine[0];
+        private DateTime shownAt, lastRenderAt;
+        private int dpi = 96;
+        [StructLayout(LayoutKind.Sequential)] private struct RectNative { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] private struct IconIdentifier { public int Size; public IntPtr Window; public uint Id; public Guid Guid; }
+        [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref IconIdentifier id, out RectNative rect);
+        [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT point);
+        [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+
+        internal UiQuotaTip()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            AutoScaleMode = AutoScaleMode.None;
+            AccessibleRole = AccessibleRole.ToolTip;
+            backdrop = new UiLiveBackdrop(BackdropBounds, delegate { if (!PresentSurface()) Dismiss(); });
+            life.Interval = 180;
+            life.Tick += delegate { Tick(); };
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000 | 0x00080000 | 0x80 | 0x20; // NoActivate, Layered, ToolWindow, click-through
+                return cp;
+            }
+        }
+        internal static Rectangle AnchorBounds(NotifyIcon icon)
+        {
+            try
+            {
+                IntPtr window;
+                uint iconId;
+                if (TrayIconHover.TryGetIdentity(icon, out window, out iconId))
+                {
+                    IconIdentifier id = new IconIdentifier { Size = Marshal.SizeOf(typeof(IconIdentifier)), Window = window, Id = iconId };
+                    RectNative rect;
+                    if (Shell_NotifyIconGetRect(ref id, out rect) == 0)
+                    {
+                        Rectangle bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+                        if (!bounds.IsEmpty && Screen.FromRectangle(bounds).Bounds.Contains(bounds.Location)) return bounds;
+                    }
+                }
+            }
+            catch { }
+            Point cursor = Cursor.Position;
+            return new Rectangle(cursor.X - 16, cursor.Y - 16, 32, 32);
+        }
+        internal bool PrepareRefresh(NotifyIcon icon)
+        {
+            if (!Visible || anchorIcon != icon) return false;
+            lastRenderAt = DateTime.MinValue;
+            return true;
+        }
+        internal void Present(NotifyIcon icon, string title, QuotaTipLine[] rows, Rectangle? placementAnchor = null)
+        {
+            if (rows == null || rows.Length == 0) { Dismiss(); return; }
+            DateTime now = DateTime.UtcNow;
+            // MouseMove fires continuously over the icon; refresh at most ~8 times a second.
+            if (Visible && anchorIcon == icon && (now - lastRenderAt).TotalMilliseconds < 120) { shownAt = now; return; }
+            anchorIcon = icon;
+            header = title ?? "";
+            lines = rows;
+            Rectangle anchor = placementAnchor ?? AnchorBounds(icon);
+            try { using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) dpi = (int)Math.Round(g.DpiX); } catch { }
+            using (Font font = TipFont(9f))
+            {
+                int width;
+                using (Graphics measure = Graphics.FromHwnd(IntPtr.Zero))
+                using (StringFormat mf = new StringFormat(StringFormat.GenericDefault))
+                {
+                    mf.FormatFlags |= StringFormatFlags.NoWrap;
+                    width = (int)Math.Ceiling(measure.MeasureString(header, font, PointF.Empty, mf).Width);
+                    foreach (QuotaTipLine line in rows)
+                        width = Math.Max(width, (int)Math.Ceiling(MeasureRow(measure, font, line, mf)));
+                }
+                Size size = new Size(width + ScalePixel(PadX) * 2 + ScalePixel(Shadow) * 2,
+                    ScalePixel(PadY) * 2 + ScalePixel(HeaderHeight) + rows.Length * ScalePixel(RowHeight) + ScalePixel(Shadow) * 2);
+                Rectangle work = Screen.FromRectangle(anchor).WorkingArea;
+                Rectangle target = UiPopup.Placement(size, anchor, work, true, ScalePixel(Shadow), ScalePixel(6));
+                if (Visible && Bounds != target) Hide();
+                Bounds = target;
+                if (!Visible) backdrop.CaptureInitial(BackdropBounds());
+                if (!PresentSurface()) throw new System.ComponentModel.Win32Exception();
+                if (!Visible) { Show(); backdrop.Start(this); }
+                shownAt = DateTime.UtcNow;
+                lastRenderAt = shownAt;
+                life.Start();
+            }
+        }
+        private int ScalePixel(int value) { return Math.Max(1, (int)Math.Round(value * dpi / 96.0)); }
+        private Rectangle BackdropBounds() { return Rectangle.Inflate(Bounds, -ScalePixel(Shadow), -ScalePixel(Shadow)); }
+
+        private bool PresentSurface()
+        {
+            using (Font font = TipFont(9f))
+            using (Bitmap bitmap = Render(ScalePixel, font))
+                return UiLayeredSurface.Present(Handle, bitmap, Location, 255);
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            if (!Visible && backdrop != null) backdrop.Stop();
+            base.OnVisibleChanged(e);
+        }
+        internal void Dismiss()
+        {
+            life.Stop();
+            anchorIcon = null;
+            if (Visible) Hide();
+        }
+        // Debug preview used by --test-quota-tip; shows the real rendering without a tray icon.
+        internal static void ShowPreview(string header, QuotaTipLine[] rows, int milliseconds)
+        {
+            UiQuotaTip tip = new UiQuotaTip();
+            tip.Present(null, header, rows);
+            System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+            timer.Interval = milliseconds;
+            timer.Tick += delegate { timer.Stop(); tip.Dismiss(); tip.Close(); Application.ExitThread(); };
+            timer.Start();
+            Application.Run(tip);
+        }
+        private static Font TipFont(float size) { return new Font("Microsoft YaHei UI", size, FontStyle.Regular); }
+        // Width must match how the row is drawn segment by segment, or the last
+        // segment gets trimmed by a few pixels.
+        private static float MeasureRow(Graphics g, Font font, QuotaTipLine line, StringFormat format)
+        {
+            using (Font rowFont = new Font(font, line.Remaining == 0 ? FontStyle.Bold : FontStyle.Regular))
+            {
+                if (line.Remaining <= 0) return g.MeasureString(line.Render(), rowFont, PointF.Empty, format).Width;
+                float width = g.MeasureString(line.Label + " ", rowFont, PointF.Empty, format).Width;
+                width += g.MeasureString(line.QuotaText, rowFont, PointF.Empty, format).Width;
+                if (!String.IsNullOrEmpty(line.Detail)) width += g.MeasureString("｜" + line.Detail, rowFont, PointF.Empty, format).Width;
+                return width;
+            }
+        }
+        private static float DrawSegment(Graphics g, Font font, Brush ink, string text, float left, RectangleF row, StringFormat format)
+        {
+            if (String.IsNullOrEmpty(text)) return left;
+            float available = Math.Max(1, row.Right - left);
+            g.DrawString(text, font, ink, new RectangleF(left, row.Top, available, row.Height), format);
+            SizeF size = g.MeasureString(text, font, PointF.Empty, format);
+            return left + Math.Min(size.Width, available);
+        }
+        private void Tick()
+        {
+            if (!Visible) { life.Stop(); return; }
+            if ((DateTime.UtcNow - shownAt).TotalSeconds > 8) { Dismiss(); return; }
+            if (anchorIcon == null) return; // preview mode keeps the tip until its own timer closes it
+            POINT cursor;
+            if (!GetCursorPos(out cursor)) return;
+            Rectangle anchor = AnchorBounds(anchorIcon);
+            anchor.Inflate(4, 4);
+            if (!anchor.Contains(new Point(cursor.X, cursor.Y))) Dismiss();
+        }
+        private Bitmap Render(Func<int, int> scale, Font font)
+        {
+            int shadow = scale(Shadow);
+            Bitmap bitmap = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using (Graphics g = Graphics.FromImage(bitmap))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                RectangleF body = new RectangleF(shadow, shadow, Width - shadow * 2, Height - shadow * 2);
+                UiBackdrop.PaintPopup(g, body, backdrop.Frame, scale(UiTheme.Dark ? UiTheme.WindowRadius : UiTheme.Radius), scale, 6, true);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                using (var format = new StringFormat(StringFormat.GenericDefault))
+                using (Font titleFont = TipFont(8.5f))
+                using (var muted = new SolidBrush(UiTheme.Dark ? UiBackdrop.PopupTextColor : Color.FromArgb(66, 76, 88)))
+                using (var normal = new SolidBrush(UiBackdrop.PopupTextColor))
+                {
+                    format.LineAlignment = StringAlignment.Center;
+                    format.FormatFlags |= StringFormatFlags.NoWrap;
+                    format.Trimming = StringTrimming.EllipsisCharacter;
+                    float x = body.Left + scale(PadX), width = body.Width - scale(PadX) * 2;
+                    g.DrawString(header, titleFont, muted, new RectangleF(x, body.Top + scale(PadY - 2), width, scale(HeaderHeight)), format);
+                    float y = body.Top + scale(PadY) + scale(HeaderHeight);
+                    foreach (QuotaTipLine line in lines)
+                    {
+                        RectangleF row = new RectangleF(x, y, width, scale(RowHeight));
+                        bool exhausted = line.Remaining == 0;
+                        bool unknown = line.Remaining < 0;
+                        using (Font rowFont = new Font(font, exhausted ? FontStyle.Bold : FontStyle.Regular))
+                        {
+                            if (exhausted || unknown)
+                            {
+                                // Exhausted keeps the whole line red; unknown stays neutral.
+                                using (var rowInk = new SolidBrush(UiTheme.QuotaInk(line.Remaining)))
+                                    g.DrawString(line.Render(), rowFont, rowInk, row, format);
+                            }
+                            else
+                            {
+                                // Only the "剩余 x%" token carries the colour; the label and
+                                // reset time stay in normal text colour.
+                                using (var quota = new SolidBrush(UiTheme.QuotaInk(line.Remaining)))
+                                {
+                                    float cursor = row.Left;
+                                    cursor = DrawSegment(g, rowFont, normal, line.Label + " ", cursor, row, format);
+                                    cursor = DrawSegment(g, rowFont, quota, line.QuotaText, cursor, row, format);
+                                    if (!String.IsNullOrEmpty(line.Detail))
+                                        DrawSegment(g, rowFont, normal, "｜" + line.Detail, cursor, row, format);
+                                }
+                            }
+                        }
+                        y += scale(RowHeight);
+                    }
+                }
+            }
+            return bitmap;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { life.Dispose(); backdrop.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
     internal sealed class UiTrayMenu : ContextMenuStrip
     {
         private NotifyIcon target; private UiPopup popup;
+        private bool menuOpen;
+        // 菜单开着的时候托盘悬停提示要让位，不然两个窗口会互相顶掉。
+        internal bool PopupVisible { get { return menuOpen && popup != null && !popup.IsDisposed; } }
         internal string StatusText;
         internal Rectangle LastAnchor,LastPopupBounds;
         internal int AnimationFrames {get{return popup==null?0:popup.AnimationFrames;}}
@@ -1905,6 +3084,8 @@ namespace QuotaTrayApp
             popup=new UiPopup(labels,0,true,Font,delegate(int index){items[index].PerformClick();},exit,StatusText);
             LastAnchor=popup.Open(null,IconAnchor,String.IsNullOrEmpty(StatusText)?156:196,true);
             LastPopupBounds=popup.Bounds;
+            menuOpen=true;
+            popup.FormClosed+=delegate{menuOpen=false;};
         }
         protected override void Dispose(bool disposing){if(disposing&&popup!=null)popup.Dispose();base.Dispose(disposing);}
     }
