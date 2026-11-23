@@ -16,6 +16,7 @@ namespace QuotaTrayApp
         internal List<SettingsAccount> Accounts;
         internal string DesktopSlot, Language, Theme, AccountReadError;
         internal int DefaultNotifyLevel;
+        internal bool NotifySound = true;
         internal bool AutoStart, AccountsLoading, CodexMissing;
     }
     internal sealed class SettingsActions
@@ -25,6 +26,7 @@ namespace QuotaTrayApp
         internal Func<string[], string, bool> SaveDisplay;
         internal Action<string, int> SetAccountLevel;
         internal Func<int, bool> ApplyGlobalLevel;
+        internal Func<bool, bool> SetNotifySound;
         internal Action<string> SetLanguage, SetTheme;
         internal Func<bool, bool> SetAutoStart;
         internal Func<UpdateStatus> ReadUpdate;
@@ -129,6 +131,7 @@ namespace QuotaTrayApp
             { "应用", new string[] { "適用", "Apply" } },
             { "应用后统一已绑定账号的档位，新绑定的账号也默认使用此档位。", new string[] { "適用すると連携済みのアカウントが同じレベルになり、新規アカウントにも適用されます。", "Apply sets this level for all bound accounts and makes it the default for newly bound accounts." } },
             { "默认提醒档位", new string[] { "既定の通知レベル", "Default alert level" } },
+            { "播放提醒声音", new string[] { "通知音を鳴らす", "Play alert sounds" } },
             { "账号提醒档位", new string[] { "アカウント別の通知レベル", "Account alert levels" } },
             { "语言", new string[] { "言語", "Language" } },
             { "开机启动", new string[] { "Windowsの起動時に開始", "Start with Windows" } },
@@ -572,7 +575,7 @@ namespace QuotaTrayApp
             { SetDisplayError(T("保存失败，请重试。")); return; }
             SetDisplayError(null);
         }
-        private FlowLayoutPanel ChoiceRow(string name, string[] labels, int selected, Action<int> choose, string[] descriptions = null, string accountSlot = null)
+        private FlowLayoutPanel ChoiceRow(string name, string[] labels, int selected, Action<int> choose, string[] descriptions = null, string accountSlot = null, bool firstIsDanger = false)
         {
             FlowLayoutPanel row = ActionRow();
             row.Name = name;
@@ -580,7 +583,8 @@ namespace QuotaTrayApp
             for (int i = 0; i < labels.Length; i++)
             {
                 int index = i;
-                var option = new UiChoice { AccountSlot = accountSlot, Text = T(labels[i]), Size = new Size(width, ControlHeight), Checked = i == selected };
+                var option = new UiChoice { AccountSlot = accountSlot, Text = T(labels[i]), Size = new Size(width, ControlHeight),
+                    Checked = i == selected, Danger = firstIsDanger && i == 0 };
                 option.Margin = new Padding(0, 0, i == labels.Length - 1 ? 0 : 6, 3);
                 if (descriptions != null)
                 {
@@ -609,7 +613,7 @@ namespace QuotaTrayApp
         private FlowLayoutPanel LevelChoices(string name, int level, Action<int> set, string accountSlot = null)
         {
             return ChoiceRow(name, Levels, Math.Max(0, Math.Min(3, level + 1)),
-                delegate(int selected) { if (set != null) set(selected - 1); }, LevelTips, accountSlot);
+                delegate(int selected) { if (set != null) set(selected - 1); }, LevelTips, accountSlot, firstIsDanger: true);
         }
 
         private Label HelpText(string text, string name)
@@ -668,6 +672,32 @@ namespace QuotaTrayApp
             global.Controls.Add(apply);
             inner.Controls.Add(global);
             inner.Controls.Add(applyError);
+
+            var sound = new UiCheckBox { Name = "notify-sound", Text = T("播放提醒声音"), AutoSize = true,
+                Checked = snapshot.NotifySound, Enabled = actions.SetNotifySound != null, Margin = new Padding(0, LayoutGap, 0, 0) };
+            Label soundError = HelpText("保存失败，请重试。", "notify-sound-error");
+            soundError.Visible = false;
+            bool restoringSound = false;
+            sound.CheckedChanged += delegate
+            {
+                if (restoringSound) return;
+                bool saved = actions.SetNotifySound != null && actions.SetNotifySound(sound.Checked);
+                if (saved) snapshot.NotifySound = sound.Checked;
+                else
+                {
+                    restoringSound = true;
+                    sound.Checked = snapshot.NotifySound;
+                    restoringSound = false;
+                }
+                bool showError = !saved;
+                if (soundError.Visible != showError)
+                {
+                    soundError.Visible = showError;
+                    ResizeCards();
+                }
+            };
+            inner.Controls.Add(sound);
+            inner.Controls.Add(soundError);
             if (snapshot.Accounts.Count == 0)
             {
                 inner = Inner(Card());
@@ -1064,6 +1094,7 @@ namespace QuotaTrayApp
         internal const int Radius = 6;
         internal const int CardRadius = 10;
         internal const int CardInnerRadius = 9;
+        private static readonly Color SelectedDangerBorder = Color.FromArgb(243, 169, 177);
         internal static string Mode = "auto";
         internal static bool Dark;
         internal static event EventHandler Changed;
@@ -1361,7 +1392,7 @@ namespace QuotaTrayApp
             else if (root.Name == "page-caption" || root.Name == "global-level-help" || root.Name == "global-level-error" || root.Name == "min-visible-accounts")
                 root.ForeColor = glass ? GlassMuted : Muted;
             if (root.Name == "account-number") root.ForeColor = AccountColor(root.Tag as string);
-            if (root.Name == "account-status-warning") root.ForeColor = WarningText;
+            if (root.Name == "account-status-warning" || root.Name == "notify-sound-error") root.ForeColor = WarningText;
             if (IsVersionText(root)) root.ForeColor = Dark ? Color.FromArgb(142, 146, 149) : Color.FromArgb(92, 102, 108);
             if (root.Name == "update-status")
                 root.ForeColor = root.Tag is bool && (bool)root.Tag ? UpdateBlue : (glass ? GlassMuted : Muted);
@@ -1457,9 +1488,9 @@ namespace QuotaTrayApp
                 bottom = Blend(color, Color.Black, Dark ? 12 : 24);
                 top = Blend(background, top, 240);
                 bottom = Blend(background, bottom, 228);
-                edge = Blend(background, color, 195);
+                edge = danger && selected ? SelectedDangerBorder : Blend(background, color, 195);
             }
-            if (selected)
+            if (selected && !danger)
             {
                 Color color = selectionColor ?? Accent;
                 top = Blend(background, color, Dark ? 61 : 42);
@@ -1507,7 +1538,7 @@ namespace QuotaTrayApp
                 Color color = danger ? Color.FromArgb(143, 50, 66) : Accent;
                 Color top = Blend(color, Color.White, hover ? 22 : 12);
                 Color bottom = Blend(color, Color.Black, pressed ? 28 : 18);
-                Color edge = Blend(color, Color.Black, 26);
+                Color edge = danger && selected ? SelectedDangerBorder : Blend(color, Color.Black, 26);
                 int fillAlpha = enabled ? 245 : 128;
                 PaintGlassSurface(g, rect, Color.FromArgb(fillAlpha, top), Color.FromArgb(fillAlpha, bottom),
                     Color.FromArgb(fillAlpha, edge));
@@ -1869,6 +1900,7 @@ namespace QuotaTrayApp
     internal sealed class UiChoice : RadioButton
     {
         internal string AccountSlot { get; set; }
+        internal bool Danger { get; set; }
         private bool hover, pressed;
 
         internal UiChoice()
@@ -1885,12 +1917,13 @@ namespace QuotaTrayApp
         {
             UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, BackColor);
             if (UiTheme.IsGlass(this) && !UiTheme.Dark)
-                UiTheme.LightGlassMaterial(e.Graphics, ClientRectangle, false, false, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
+                UiTheme.LightGlassMaterial(e.Graphics, ClientRectangle, false, Danger, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
             else
-                UiTheme.Material(e.Graphics, ClientRectangle, BackColor, false, false, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
+                UiTheme.Material(e.Graphics, ClientRectangle, BackColor, false, Danger, hover, pressed, Enabled, Checked, UiTheme.AccountColor(AccountSlot));
             Rectangle text = ClientRectangle;
             text.Inflate(-8, 0);
-            UiTheme.DrawText(this, e.Graphics, Text, Font, text, Enabled ? UiTheme.TextColor : UiTheme.Muted,
+            Color foreground = !Enabled ? UiTheme.Muted : Danger ? Color.White : UiTheme.TextColor;
+            UiTheme.DrawText(this, e.Graphics, Text, Font, text, foreground,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             if (Focused && ShowFocusCues && UiInput.Keyboard) UiTheme.Focus(e.Graphics, ClientRectangle);
         }

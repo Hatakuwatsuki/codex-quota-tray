@@ -105,9 +105,14 @@ namespace QuotaTrayApp
             return null;
         }
 
-        internal static bool TryPlay(Format format, byte[] samples, Action ready)
+        internal static void Stop()
         {
             if (active != null) active.Dispose();
+        }
+
+        internal static bool TryPlay(Format format, byte[] samples, Action ready)
+        {
+            Stop();
             var playback = new ToastSound { ready = ready };
             try
             {

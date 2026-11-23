@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.43.0")]
+[assembly: AssemblyVersion("1.9.45.0")]
 
 namespace QuotaTrayApp
 {
@@ -930,6 +930,7 @@ namespace QuotaTrayApp
     internal class AppSettings
     {
         public int notifyLevel = 0;
+        public bool notifySound = true;
         public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
         public string codexPath = "";      // 手动指定或自动找到的 codex.exe
@@ -971,6 +972,15 @@ namespace QuotaTrayApp
             return false;
         }
 
+        internal bool SetNotifySound(string root, bool enabled)
+        {
+            bool previous = notifySound;
+            notifySound = enabled;
+            if (Save(root)) return true;
+            notifySound = previous;
+            return false;
+        }
+
         private static int ParseLevel(string value)
         {
             switch (value) { case "off": case "none": case "-1": return -1; case "medium": case "mid": case "1": return 1; case "high": case "2": return 2; default: return 0; }
@@ -999,6 +1009,7 @@ namespace QuotaTrayApp
                     else if (k == "theme") s.theme = UiTheme.Normalize(v);
                     else if (k == "bindingsetupdone") s.bindingSetupDone = v == "true";
                     else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
+                    else if (k == "notifysound" && (v == "true" || v == "false")) s.notifySound = v == "true";
                     else if (k.StartsWith("notify.") && DisplayPolicy.ValidSlot(k.Substring(7))) s.accountLevels[k.Substring(7)] = ParseLevel(v);
                     else if (k == "language")
                     {
@@ -1040,6 +1051,7 @@ namespace QuotaTrayApp
             {
                 string text = "# 额度提醒档位：off / low / medium / high" + Environment.NewLine
                             + "notifyLevel=" + Key() + Environment.NewLine
+                            + "notifySound=" + (notifySound ? "true" : "false") + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
                             + "language=" + language + Environment.NewLine
                             + "# 找不到 Codex 时可手填 codex.exe 完整路径" + Environment.NewLine
@@ -2129,6 +2141,7 @@ namespace QuotaTrayApp
         // 自绘提醒窗与提示音
         private ToastForm toast;
         private static System.Collections.Generic.Dictionary<string, System.Media.SoundPlayer> players;
+        private static System.Media.SoundPlayer fallbackToastSound;
 
         // 调试预览模式：绝不碰桌面快捷方式和桌面图标
         private bool noDesktopTouch;
@@ -2400,7 +2413,8 @@ namespace QuotaTrayApp
                 return new SettingsSnapshot { Accounts = multiAccounts == null ? new System.Collections.Generic.List<SettingsAccount>() : multiAccounts.SettingsAccounts(),
                     AccountsLoading = accountDiscoveryPending, DesktopSlot = multiAccounts == null ? "auto" : multiAccounts.DesktopPreference,
                     CodexMissing = !settings.HasCodex, AccountReadError = multiDiscoveryError,
-                    Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel, AutoStart = IsAutoStartEnabled() };
+                    Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel,
+                    NotifySound = settings.notifySound, AutoStart = IsAutoStartEnabled() };
             };
             actions.ConnectAccounts = delegate { ShowAccountConnections(); };
             actions.RefreshAll = delegate { if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
@@ -2413,6 +2427,12 @@ namespace QuotaTrayApp
                 if (multiAccounts != null) multiAccounts.ResetReminder(slot);
             };
             actions.ApplyGlobalLevel = ApplyGlobalNotifyLevel;
+            actions.SetNotifySound = delegate(bool enabled)
+            {
+                if (!settings.SetNotifySound(root, enabled)) return false;
+                if (!enabled) StopToastSound();
+                return true;
+            };
             actions.SetLanguage = delegate(string language) { SetLanguage(language); if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Reload(); };
             actions.SetTheme = delegate(string theme) { settings.theme = UiTheme.Normalize(theme); settings.Save(root); UiTheme.Set(settings.theme); };
             actions.SetAutoStart = delegate(bool enabled) { return SetAutoStart(enabled); };
@@ -2883,7 +2903,7 @@ namespace QuotaTrayApp
             accountToasts.Enqueue(null, L.T("额度显示器"), NotifyRules.RecoveryBody(days), RecoverySound, null, true);
         }
 
-        // 自绘弹窗，同时播放 exe 同目录里的提示音
+        // 自绘弹窗，按设置决定是否在滑入时播放提示音
         private void ShowToast(string title, string body, string soundFile, string slot = null, string emailMask = null, bool compact = false)
         {
             try
@@ -2894,7 +2914,7 @@ namespace QuotaTrayApp
                     toast = null;
                 }
                 toast = new ToastForm(title, body, slot, emailMask, compact);
-                AttachToastSound(toast, root, soundFile, Log);
+                AttachToastSound(toast, root, soundFile, Log, settings.notifySound);
                 toast.Show();
             }
             catch (Exception ex)
@@ -2903,8 +2923,17 @@ namespace QuotaTrayApp
             }
         }
 
-        private static void AttachToastSound(ToastForm form, string dir, string soundFile, Action<string> report)
+        internal static void StopToastSound()
         {
+            ToastSound.Stop();
+            if (fallbackToastSound == null) return;
+            fallbackToastSound.Stop();
+            fallbackToastSound = null;
+        }
+
+        internal static void AttachToastSound(ToastForm form, string dir, string soundFile, Action<string> report, bool enabled = true)
+        {
+            if (!enabled) return;
             try
             {
                 System.Media.SoundPlayer player = LoadNotifySound(dir, soundFile);
@@ -2924,6 +2953,7 @@ namespace QuotaTrayApp
                     {
                         if (samples != null && ToastSound.TryPlay(format, samples, slideIn)) return;
                         player.Play();
+                        fallbackToastSound = player;
                     }
                     catch (Exception ex) { report("提示音失败：" + ex.Message); }
                     slideIn();
@@ -3812,7 +3842,7 @@ namespace QuotaTrayApp
 
             using (ToastForm form = new ToastForm(L.T("额度提醒"), body, slot, "22***@example.com", restored))
             {
-                AttachToastSound(form, dir, sound, Console.Error.WriteLine);
+                AttachToastSound(form, dir, sound, Console.Error.WriteLine, prefs.notifySound);
                 Application.Run(form);
             }
         }
