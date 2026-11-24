@@ -17,6 +17,7 @@ namespace QuotaTrayApp
         internal string DesktopSlot, Language, Theme, AccountReadError;
         internal int DefaultNotifyLevel;
         internal bool NotifySound = true;
+        internal int NotifyVolume = AppSettings.DefaultNotifyVolume;
         internal bool AutoStart, AccountsLoading, CodexMissing;
     }
     internal sealed class SettingsActions
@@ -27,6 +28,8 @@ namespace QuotaTrayApp
         internal Action<string, int> SetAccountLevel;
         internal Func<int, bool> ApplyGlobalLevel;
         internal Func<bool, bool> SetNotifySound;
+        internal Func<int, bool> SetNotifyVolume;
+        internal Action<int> TestNotifyVolume;
         internal Action<string> SetLanguage, SetTheme;
         internal Func<bool, bool> SetAutoStart;
         internal Func<UpdateStatus> ReadUpdate;
@@ -132,6 +135,13 @@ namespace QuotaTrayApp
             { "应用后统一已绑定账号的档位，新绑定的账号也默认使用此档位。", new string[] { "適用すると連携済みのアカウントが同じレベルになり、新規アカウントにも適用されます。", "Apply sets this level for all bound accounts and makes it the default for newly bound accounts." } },
             { "默认提醒档位", new string[] { "既定の通知レベル", "Default alert level" } },
             { "播放提醒声音", new string[] { "通知音を鳴らす", "Play alert sounds" } },
+            { "提醒音量", new string[] { "通知音量", "Alert volume" } },
+            { "试听", new string[] { "試聴", "Test" } },
+            { "静音", new string[] { "消音", "Mute" } },
+            { "轻声", new string[] { "小", "Soft" } },
+            { "适中", new string[] { "中", "Mid" } },
+            { "响亮", new string[] { "大", "Loud" } },
+            { "最大", new string[] { "最大", "Max" } },
             { "账号提醒档位", new string[] { "アカウント別の通知レベル", "Account alert levels" } },
             { "语言", new string[] { "言語", "Language" } },
             { "开机启动", new string[] { "Windowsの起動時に開始", "Start with Windows" } },
@@ -677,12 +687,17 @@ namespace QuotaTrayApp
                 Checked = snapshot.NotifySound, Enabled = actions.SetNotifySound != null, Margin = new Padding(0, LayoutGap, 0, 0) };
             Label soundError = HelpText("保存失败，请重试。", "notify-sound-error");
             soundError.Visible = false;
+            FlowLayoutPanel volumeRow = NotifyVolumeRow(soundError);
             bool restoringSound = false;
             sound.CheckedChanged += delegate
             {
                 if (restoringSound) return;
                 bool saved = actions.SetNotifySound != null && actions.SetNotifySound(sound.Checked);
-                if (saved) snapshot.NotifySound = sound.Checked;
+                if (saved)
+                {
+                    snapshot.NotifySound = sound.Checked;
+                    volumeRow.Enabled = sound.Checked;
+                }
                 else
                 {
                     restoringSound = true;
@@ -697,6 +712,7 @@ namespace QuotaTrayApp
                 }
             };
             inner.Controls.Add(sound);
+            inner.Controls.Add(volumeRow);
             inner.Controls.Add(soundError);
             if (snapshot.Accounts.Count == 0)
             {
@@ -720,6 +736,70 @@ namespace QuotaTrayApp
                         if (pendingGlobalLevel.HasValue) select(pendingGlobalLevel.Value); }, current.Slot));
             }
         }
+        private FlowLayoutPanel NotifyVolumeRow(Label soundError)
+        {
+            FlowLayoutPanel row = ActionRow();
+            row.Name = "notify-volume-row";
+            row.Margin = new Padding(0, S(4), 0, 0);
+            row.Enabled = snapshot.NotifySound;
+            Label label = TextLine("提醒音量", false);
+            label.Name = "notify-volume-label";
+            label.AutoSize = false;
+            label.Size = new Size(TextRenderer.MeasureText(label.Text, Font).Width + S(2), ControlHeight);
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.Margin = new Padding(0, 0, S(6), 0);
+            var volume = new UiPillSlider(new[] { 0, 25, 50, 75, 100 },
+                new[] { T("静音"), T("轻声"), T("适中"), T("响亮"), T("最大") })
+            {
+                Name = "notify-volume", AccessibleName = label.Text,
+                Size = new Size(S(204), ControlHeight + S(18)), Margin = Padding.Empty,
+                Value = snapshot.NotifyVolume, Enabled = actions.SetNotifyVolume != null,
+                Font = new Font(Font.FontFamily, 8.5f)
+            };
+            Font scaleFont = volume.Font;
+            volume.Disposed += delegate { scaleFont.Dispose(); };
+            Label percent = TextLine("", false);
+            percent.AutoSize = false;
+            percent.Name = "notify-volume-value";
+            percent.Size = new Size(S(44), ControlHeight);
+            percent.TextAlign = ContentAlignment.MiddleRight;
+            percent.Margin = new Padding(0, 0, S(8), 0);
+            percent.Text = volume.Value + "%";
+            var test = new UiButton
+            {
+                Name = "test-notify-volume", Text = T("试听"), Size = new Size(S(60), ControlHeight),
+                Margin = Padding.Empty, Enabled = actions.TestNotifyVolume != null
+            };
+            test.Click += delegate { if (actions.TestNotifyVolume != null) actions.TestNotifyVolume(volume.Value); };
+
+            bool restoring = false;
+            Action save = delegate
+            {
+                if (restoring || actions.SetNotifyVolume == null || snapshot.NotifyVolume == volume.Value) return;
+                bool saved = actions.SetNotifyVolume(volume.Value);
+                if (saved) snapshot.NotifyVolume = volume.Value;
+                else
+                {
+                    restoring = true;
+                    volume.Value = snapshot.NotifyVolume;
+                    restoring = false;
+                }
+                if (soundError.Visible == saved)
+                {
+                    soundError.Visible = !saved;
+                    ResizeCards();
+                }
+            };
+            volume.DragCompleted += delegate { save(); };
+            volume.ValueChanged += delegate
+            {
+                percent.Text = volume.Value + "%";
+                if (!volume.IsDragging) save();
+            };
+            row.Controls.AddRange(new Control[] { label, volume, percent, test });
+            return row;
+        }
+
         private void GeneralPage()
         {
             GroupBox card = Card(); FlowLayoutPanel inner = Inner(card);
@@ -1381,7 +1461,7 @@ namespace QuotaTrayApp
             else if (root is UiCard) root.BackColor = ((UiCard)root).SurfaceColor;
             else if (root is UiComboBox) root.BackColor = Input;
             else if (root is TextBox) root.BackColor = Surface;
-            else if (root is UiButton || root is UiChoice || root is UiCheckBox)
+            else if (root is UiButton || root is UiChoice || root is UiCheckBox || root is UiPillSlider)
             {
                 UiCard card = FindCardParent(root);
                 root.BackColor = card != null ? card.SurfaceColor : Surface;
@@ -1513,7 +1593,7 @@ namespace QuotaTrayApp
             PaintRoundedSurface(g, rect, top, bottom, edge);
         }
 
-        internal static void PaintGlassSurface(Graphics g, Rectangle rect, Color top, Color bottom, Color? border, int radius = Radius)
+        internal static void PaintGlassSurface(Graphics g, RectangleF rect, Color top, Color bottom, Color? border, float radius = Radius)
         {
             if (rect.Width < 2 || rect.Height < 2) return;
             RectangleF outer = new RectangleF(rect.X + 0.5f, rect.Y + 0.5f, rect.Width - 1f, rect.Height - 1f);
@@ -2004,6 +2084,287 @@ namespace QuotaTrayApp
         }
         protected override void Dispose(bool disposing){if(disposing)timer.Dispose();base.Dispose(disposing);}
     }
+    internal sealed class UiPillSlider : Control
+    {
+        private const int SettleMilliseconds = 95;
+        private const double DetentHold = 6.6, DetentReach = 16.5, ReleaseReach = 9.9;
+        private readonly int[] stops;
+        private readonly string[] labels;
+        private readonly Timer settle = new Timer { Interval = 15 };
+        private readonly System.Diagnostics.Stopwatch elapsed = new System.Diagnostics.Stopwatch();
+        private double rawValue, position, animationStart;
+        private float grabOffset;
+        private int value;
+        private bool hover, dragging;
+        internal event EventHandler ValueChanged, DragCompleted;
+
+        internal UiPillSlider(int[] stops, string[] labels)
+        {
+            this.stops = stops;
+            this.labels = labels;
+            AccessibleRole = AccessibleRole.Slider;
+            TabStop = true;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            settle.Tick += delegate
+            {
+                double t = Math.Min(1.0, elapsed.Elapsed.TotalMilliseconds / SettleMilliseconds);
+                position = value + (animationStart - value) * Math.Pow(1 - t, 3);
+                Invalidate();
+                if (t >= 1) settle.Stop();
+            };
+        }
+
+        internal int Value
+        {
+            get { return value; }
+            set
+            {
+                int next = Math.Max(0, Math.Min(100, value));
+                if (!dragging)
+                {
+                    settle.Stop();
+                    position = next;
+                }
+                Invalidate();
+                if (next == this.value) return;
+                this.value = next;
+                if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+                if (IsHandleCreated && !IsDisposed) AccessibilityNotifyClients(AccessibleEvents.ValueChange, -1);
+            }
+        }
+        internal bool IsDragging { get { return dragging; } }
+
+        private int D(int pixels) { return UiTheme.S(pixels, UiTheme.DpiScaleOf(this)); }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && Enabled)
+            {
+                Focus();
+                settle.Stop();
+                float distance = e.X - ValueX(position);
+                grabOffset = Math.Abs(distance) <= D(9) && Math.Abs(e.Y - D(16)) <= D(13) ? distance : 0;
+                dragging = true;
+                Capture = true;
+                MoveThumb(e.X);
+            }
+            base.OnMouseDown(e);
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (dragging) MoveThumb(e.X);
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && dragging)
+            {
+                MoveThumb(e.X);
+                FinishDrag();
+            }
+            base.OnMouseUp(e);
+        }
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            if (!Capture && dragging) FinishDrag();
+            base.OnMouseCaptureChanged(e);
+        }
+
+        private int ClosestStop(double target)
+        {
+            int closest = stops[0];
+            foreach (int stop in stops)
+                if (Math.Abs(stop - target) < Math.Abs(closest - target)) closest = stop;
+            return closest;
+        }
+        private void MoveThumb(int pointerX)
+        {
+            float start = ValueX(0), span = ValueX(100) - start;
+            rawValue = Math.Max(0, Math.Min(100, (pointerX - grabOffset - start) * 100.0 / span));
+            int stop = ClosestStop(rawValue);
+            double distance = Math.Abs(rawValue - stop) * span / (100 * UiTheme.DpiScaleOf(this));
+            // Blend smoothly from a short hold at the mark to unrestricted pointer movement.
+            double t = Math.Max(0, Math.Min(1, (distance - DetentHold) / (DetentReach - DetentHold)));
+            position = stop + (rawValue - stop) * t * t * (3 - 2 * t);
+            Value = (int)Math.Round(position);
+        }
+        private void FinishDrag()
+        {
+            int stop = ClosestStop(rawValue);
+            if (Math.Abs(ValueX(rawValue) - ValueX(stop)) <= ReleaseReach * UiTheme.DpiScaleOf(this)) Value = stop;
+            dragging = false;
+            Capture = false;
+            if (Math.Abs(position - value) > .1 && SystemInformation.IsMenuAnimationEnabled)
+            {
+                animationStart = position;
+                elapsed.Restart();
+                settle.Start();
+            }
+            else position = value;
+            Invalidate();
+            if (DragCompleted != null) DragCompleted(this, EventArgs.Empty);
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            switch (keyData & Keys.KeyCode)
+            {
+                case Keys.Left: case Keys.Right: case Keys.Up: case Keys.Down:
+                case Keys.PageUp: case Keys.PageDown: case Keys.Home: case Keys.End: return true;
+                default: return base.IsInputKey(keyData);
+            }
+        }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (!Enabled) return;
+            switch (e.KeyCode)
+            {
+                case Keys.Left: case Keys.Down: Value--; break;
+                case Keys.Right: case Keys.Up: Value++; break;
+                case Keys.PageDown: Value -= 10; break;
+                case Keys.PageUp: Value += 10; break;
+                case Keys.Home: Value = 0; break;
+                case Keys.End: Value = 100; break;
+                default: base.OnKeyDown(e); return;
+            }
+            e.Handled = true;
+            base.OnKeyDown(e);
+        }
+
+        protected override AccessibleObject CreateAccessibilityInstance() { return new SliderAccessible(this); }
+        private sealed class SliderAccessible : ControlAccessibleObject
+        {
+            private readonly UiPillSlider slider;
+            internal SliderAccessible(UiPillSlider slider) : base(slider) { this.slider = slider; }
+            public override string Value
+            {
+                get { return slider.Value + "%"; }
+                set
+                {
+                    int number;
+                    if (slider.Enabled && value != null && Int32.TryParse(value.Trim().TrimEnd('%'), out number))
+                        slider.Value = number;
+                }
+            }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { dragging = false; settle.Dispose(); }
+            base.Dispose(disposing);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, BackColor);
+        }
+
+        internal Rectangle ChannelBounds()
+        {
+            int inset = D(16);
+            return new Rectangle(inset, D(13), Math.Max(1, Width - inset * 2), D(6));
+        }
+        internal float ValueX(double value)
+        {
+            Rectangle rail = ChannelBounds();
+            int halfThumb = D(5);
+            return rail.Left + halfThumb + (float)(Math.Max(1, rail.Width - halfThumb * 2) * value / 100);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            if (Width < 2 || Height < 2) return;
+            float scale = UiTheme.DpiScaleOf(this);
+            Rectangle rail = ChannelBounds();
+            int center = D(16);
+            int thumbWidth = UiTheme.S(10, scale), thumbHeight = UiTheme.S(18, scale);
+            float x = ValueX(position);
+            RectangleF thumb = new RectangleF(x - thumbWidth / 2f, center - thumbHeight / 2f, thumbWidth, thumbHeight);
+            if (SystemInformation.HighContrast)
+            {
+                Color state = Enabled ? SystemColors.Highlight : SystemColors.GrayText;
+                PaintRail(e.Graphics, rail, x, SystemColors.Window, SystemColors.Window, SystemColors.WindowText,
+                    state, state);
+                UiTheme.PaintGlassSurface(e.Graphics, thumb, state, state, SystemColors.WindowText, UiTheme.S(4, scale));
+            }
+            else
+            {
+                bool dark = UiTheme.Dark;
+                Color accent = Enabled ? UiTheme.Accent : Color.FromArgb(128, 128, 128);
+                Color railTop = Tint(dark ? 158 : 112, dark ? Color.FromArgb(20, 25, 27) : Color.FromArgb(105, 124, 119));
+                Color railBottom = Tint(dark ? 86 : 51, dark ? Color.FromArgb(106, 118, 116) : Color.FromArgb(159, 180, 172));
+                Color railEdge = Tint(dark ? 60 : 64, dark ? Color.White : Color.FromArgb(71, 99, 89));
+                PaintRail(e.Graphics, rail, x, railTop, railBottom, railEdge,
+                    Tint(219, UiTheme.Blend(accent, Color.White, dark ? 81 : 86)),
+                    Tint(179, UiTheme.Blend(accent, Color.Black, dark ? 52 : 22)));
+
+                int radius = UiTheme.S(4, scale);
+                RectangleF shadow = thumb;
+                shadow.Offset(0, UiTheme.S(1, scale));
+                UiTheme.PaintGlassSurface(e.Graphics, shadow, Tint(74, Color.Black), Tint(24, Color.Black), null, radius);
+                int light = dragging && Math.Abs(position - ClosestStop(position)) < .05 ? 63 : hover || dragging ? 38 : 25;
+                Color front = UiTheme.Blend(dark ? Color.FromArgb(131, 171, 158) : Color.FromArgb(238, 249, 245), Color.White, light);
+                Color baseColor = dark ? Color.FromArgb(39, 75, 64) : Color.FromArgb(144, 193, 174);
+                if (!Enabled)
+                {
+                    int upperGray = dark ? 143 : 192, lowerGray = dark ? 74 : 133;
+                    front = Color.FromArgb(upperGray, upperGray, upperGray);
+                    baseColor = Color.FromArgb(lowerGray, lowerGray, lowerGray);
+                }
+                UiTheme.PaintGlassSurface(e.Graphics, thumb, Tint(231, front), Tint(204, baseColor),
+                    Tint(235, UiTheme.Blend(accent, Color.White, dark ? 54 : 36)), radius);
+                RectangleF shine = RectangleF.Inflate(thumb, -UiTheme.S(2, scale), -UiTheme.S(2, scale));
+                shine.Height = UiTheme.S(7, scale);
+                UiTheme.PaintGlassSurface(e.Graphics, shine, Tint(147, Color.White), Tint(0, Color.White), null, UiTheme.S(2, scale));
+            }
+            PaintScale(e.Graphics);
+            if (Focused && ShowFocusCues && UiInput.Keyboard) UiTheme.Focus(e.Graphics, ClientRectangle);
+        }
+
+        private Color Tint(int opacity, Color color) { return Color.FromArgb(Enabled ? opacity : opacity * 55 / 100, color); }
+
+        private void PaintRail(Graphics graphics, RectangleF bounds, float thumbX,
+            Color top, Color bottom, Color edge, Color filledTop, Color filledBottom)
+        {
+            UiTheme.PaintGlassSurface(graphics, bounds, top, bottom, edge, bounds.Height / 2);
+            if (position <= 0) return;
+            float width = position >= 100 ? bounds.Width : thumbX - bounds.Left;
+            if (width < 2) return;
+            bounds.Width = width;
+            UiTheme.PaintGlassSurface(graphics, bounds, filledTop, filledBottom, null, bounds.Height / 2);
+        }
+        internal Rectangle ScaleCaptionBounds(int index)
+        {
+            int x = (int)Math.Round(ValueX(stops[index]));
+            int width = TextRenderer.MeasureText(labels[index], Font).Width;
+            return new Rectangle(x - width / 2, D(35), width, Height - D(35));
+        }
+        private void PaintScale(Graphics graphics)
+        {
+            Color normal = SystemInformation.HighContrast ? SystemColors.WindowText : UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted;
+            Color active = SystemInformation.HighContrast ? SystemColors.Highlight : UiTheme.Accent;
+            if (!Enabled)
+                normal = SystemInformation.HighContrast ? SystemColors.GrayText :
+                    UiTheme.IsGlass(this) ? Color.FromArgb(145, normal) : UiTheme.Blend(BackColor, normal, 145);
+            int top = D(29), bottom = D(32);
+            for (int i = 0; i < labels.Length; i++)
+            {
+                float x = ValueX(stops[i]);
+                bool selected = Enabled && Value == stops[i];
+                Color ink = selected ? active : normal;
+                using (var pen = new Pen(Color.FromArgb(selected ? 225 : 146, ink)))
+                    graphics.DrawLine(pen, x, top, x, bottom);
+                UiTheme.DrawText(this, graphics, labels[i], Font, ScaleCaptionBounds(i), ink,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine);
+            }
+        }
+    }
+
     internal sealed class QuotaMeter : Control
     {
         private WindowInfo quota;
@@ -2480,16 +2841,29 @@ namespace QuotaTrayApp
             SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer|ControlStyles.Selectable|ControlStyles.ResizeRedraw,true);
             Size=new Size(UiTheme.S(184,s),UiTheme.S(33,s));Margin=new Padding(0,0,0,UiTheme.S(10,s));TabStop=true;AccessibleRole=AccessibleRole.ComboBox;Cursor=Cursors.Hand;
         }
-        protected override bool IsInputKey(Keys keyData) {Keys k=keyData&Keys.KeyCode;return k==Keys.Up||k==Keys.Down||k==Keys.Home||k==Keys.End||base.IsInputKey(keyData);}
+        private bool PopupOpen { get { return popup != null && !popup.IsDisposed; } }
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            return key == Keys.Up || key == Keys.Down || key == Keys.Home || key == Keys.End ||
+                (PopupOpen && (key == Keys.Escape || key == Keys.Enter)) || base.IsInputKey(keyData);
+        }
         protected override void OnMouseEnter(EventArgs e){hover=true;Invalidate();base.OnMouseEnter(e);}
         protected override void OnMouseLeave(EventArgs e){hover=false;Invalidate();base.OnMouseLeave(e);}
         protected override void OnMouseDown(MouseEventArgs e){base.OnMouseDown(e);if(e.Button==MouseButtons.Left){UiInput.Keyboard=false;Focus();Open();}}
         protected override void OnGotFocus(EventArgs e){Invalidate();base.OnGotFocus(e);}
-        protected override void OnLostFocus(EventArgs e){Invalidate();base.OnLostFocus(e);}
+        protected override void OnLostFocus(EventArgs e)
+        {
+            if (PopupOpen) popup.Close();
+            Invalidate();
+            base.OnLostFocus(e);
+        }
         protected override void OnKeyDown(KeyEventArgs e)
         {
             UiInput.Keyboard=true;
-            if(e.KeyCode==Keys.Space||e.KeyCode==Keys.Enter||e.KeyCode==Keys.F4||(e.Alt&&e.KeyCode==Keys.Down)){Open();e.Handled=true;}
+            bool toggle = e.KeyCode == Keys.F4 || (e.Alt && e.KeyCode == Keys.Down);
+            if (PopupOpen && !toggle && popup.HandleNavigation(e.KeyCode)) e.Handled = true;
+            else if(e.KeyCode==Keys.Space||e.KeyCode==Keys.Enter||toggle){Open();e.Handled=true;}
             else if(Items.Count>0)
             {
                 if(e.KeyCode==Keys.Down){SelectedIndex=Math.Min(Items.Count-1,selected+1);e.Handled=true;}
@@ -2502,7 +2876,7 @@ namespace QuotaTrayApp
         internal void Open()
         {
             if(!Enabled || Items.Count==0)return;
-            if(popup!=null&&!popup.IsDisposed){popup.Close();return;}
+            if(PopupOpen){popup.Close();return;}
             string[] labels=Items.ConvertAll<string>(delegate(object x){return Convert.ToString(x);}).ToArray();
             popup=new UiPopup(labels,selected,false,Font,delegate(int i){SelectedIndex=i;});
             popup.Open(this, null, 0, false);
@@ -2853,7 +3227,7 @@ namespace QuotaTrayApp
         }
     }
 
-    internal sealed class UiPopup : Form
+    internal sealed class UiPopup : Form, IMessageFilter
     {
         internal const int Shadow=9, RowHeight=32;
         private readonly string[] labels; private readonly bool menu; private readonly Action<int> choose;
@@ -2866,6 +3240,8 @@ namespace QuotaTrayApp
         private int dpi = 96;
         private int shadow = Shadow, rowHeight = RowHeight;
         private IntPtr dpiContext;
+        private Form comboOwner;
+        private IntPtr comboAnchor;
         private const int PerMonitorAware = -3;
         [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
         [DllImport("user32.dll")] private static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
@@ -2880,12 +3256,23 @@ namespace QuotaTrayApp
             this.dangerIndex=dangerIndex;
             this.status=status;
             backdrop = new UiLiveBackdrop(BackdropBounds, delegate { RenderSurface(false); }, menu);
-            Font=font; FormBorderStyle=FormBorderStyle.None; ShowInTaskbar=false; TopMost=true; StartPosition=FormStartPosition.Manual;AutoScaleMode=AutoScaleMode.None;
+            Font=font; FormBorderStyle=FormBorderStyle.None; ShowInTaskbar=false; TopMost=menu; StartPosition=FormStartPosition.Manual;AutoScaleMode=AutoScaleMode.None;
             AccessibleRole=menu?AccessibleRole.MenuPopup:AccessibleRole.List;Text=menu?L.T("设置"):"";
             AccessibleDescription = status;
             animation.Interval=15;animation.Tick+=delegate {progress=Math.Min(1,(float)(DateTime.UtcNow-started).TotalMilliseconds/160);RenderSurface();if(progress>=1)animation.Stop();};
         }
-        protected override CreateParams CreateParams {get {CreateParams p=base.CreateParams;p.ExStyle|=0x80000|0x80;return p;}}
+        // A settings dropdown uses its owner's focus and Z-order. The tray menu takes focus itself.
+        protected override bool ShowWithoutActivation { get { return !menu; } }
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams p = base.CreateParams;
+                p.ExStyle |= 0x80000 | 0x80;
+                if (!menu) p.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                return p;
+            }
+        }
         internal static Rectangle Placement(Size size,Rectangle anchor,Rectangle work,bool tray,int shadow=Shadow,int gap=6)
         {
             int x=anchor.Left-shadow,y=anchor.Bottom+gap-shadow;
@@ -2938,11 +3325,20 @@ namespace QuotaTrayApp
                 SystemParametersInfo(0x1002, 0, out animate, 0);
                 progress = animate ? .01f : 1;
                 started = DateTime.UtcNow;
-                if (owner != null && owner.FindForm() != null) Show(owner.FindForm()); else Show();
+                Form parent = owner == null ? null : owner.FindForm();
+                if (parent == null) Show();
+                else Show(parent);
+                if (!menu && parent != null)
+                {
+                    comboOwner = parent;
+                    comboAnchor = owner.Handle;
+                    comboOwner.Deactivate += OnOwnerDeactivate;
+                    Application.AddMessageFilter(this);
+                }
                 ready = true;
                 RenderSurface();
                 if (menu) backdrop.Start(this);
-                Activate();
+                if (menu) Activate();
                 if (animate) animation.Start();
                 return anchor;
             }
@@ -3047,16 +3443,52 @@ namespace QuotaTrayApp
         }
         private void Commit(){if(active<0)return;int index=active;Close();choose(index);}
         protected override bool IsInputKey(Keys keyData){return true;}
-        protected override void OnKeyDown(KeyEventArgs e)
+        internal bool HandleNavigation(Keys key)
         {
-            if(e.KeyCode==Keys.Escape){Close();return;}
-            if(e.KeyCode==Keys.Enter||e.KeyCode==Keys.Space){Commit();return;}
-            if(e.KeyCode==Keys.Up)active=active<0?labels.Length-1:(active+labels.Length-1)%labels.Length;
-            if(e.KeyCode==Keys.Down)active=(active+1)%labels.Length;
-            if(e.KeyCode==Keys.Home)active=0;if(e.KeyCode==Keys.End)active=labels.Length-1;RenderSurface();e.Handled=true;
+            switch (key)
+            {
+                case Keys.Escape: Close(); return true;
+                case Keys.Enter:
+                case Keys.Space: Commit(); return true;
+                case Keys.Up: active = active < 0 ? labels.Length - 1 : (active + labels.Length - 1) % labels.Length; break;
+                case Keys.Down: active = (active + 1) % labels.Length; break;
+                case Keys.Home: active = 0; break;
+                case Keys.End: active = labels.Length - 1; break;
+                default: return false;
+            }
+            RenderSurface();
+            return true;
         }
-        protected override void OnDeactivate(EventArgs e){base.OnDeactivate(e);if(ready)Close();}
-        protected override void Dispose(bool disposing){if(disposing){animation.Dispose();backdrop.Dispose();}base.Dispose(disposing);}
+        protected override void OnKeyDown(KeyEventArgs e) { HandleNavigation(e.KeyCode); e.Handled = true; }
+        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); if (menu && ready) Close(); }
+        private void OnOwnerDeactivate(object sender, EventArgs e) { Close(); }
+        bool IMessageFilter.PreFilterMessage(ref Message message)
+        {
+            // Keep the click for its original target, including other controls and title bars.
+            switch (message.Msg)
+            {
+                case 0x0201: case 0x0204: case 0x0207: case 0x020B: // client button down
+                case 0x00A1: case 0x00A4: case 0x00A7: case 0x00AB: // non-client button down
+                    if (message.HWnd != Handle && message.HWnd != comboAnchor) Close();
+                    break;
+            }
+            return false;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (comboOwner != null)
+                {
+                    Application.RemoveMessageFilter(this);
+                    comboOwner.Deactivate -= OnOwnerDeactivate;
+                    comboOwner = null;
+                }
+                animation.Dispose();
+                backdrop.Dispose();
+            }
+            base.Dispose(disposing);
+        }
         protected override AccessibleObject CreateAccessibilityInstance(){return new PopupAccessible(this);}
         private sealed class PopupAccessible : ControlAccessibleObject
         {

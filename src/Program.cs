@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.45.0")]
+[assembly: AssemblyVersion("1.9.47.0")]
 
 namespace QuotaTrayApp
 {
@@ -931,6 +931,8 @@ namespace QuotaTrayApp
     {
         public int notifyLevel = 0;
         public bool notifySound = true;
+        internal const int DefaultNotifyVolume = 100;
+        public int notifyVolume = DefaultNotifyVolume;
         public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
         public string codexPath = "";      // 手动指定或自动找到的 codex.exe
@@ -981,6 +983,16 @@ namespace QuotaTrayApp
             return false;
         }
 
+        internal bool SetNotifyVolume(string root, int volume)
+        {
+            if (volume < 0 || volume > 100) return false;
+            int previous = notifyVolume;
+            notifyVolume = volume;
+            if (Save(root)) return true;
+            notifyVolume = previous;
+            return false;
+        }
+
         private static int ParseLevel(string value)
         {
             switch (value) { case "off": case "none": case "-1": return -1; case "medium": case "mid": case "1": return 1; case "high": case "2": return 2; default: return 0; }
@@ -1010,6 +1022,11 @@ namespace QuotaTrayApp
                     else if (k == "bindingsetupdone") s.bindingSetupDone = v == "true";
                     else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
                     else if (k == "notifysound" && (v == "true" || v == "false")) s.notifySound = v == "true";
+                    else if (k == "notifyvolume")
+                    {
+                        int volume;
+                        if (Int32.TryParse(v, out volume) && volume >= 0 && volume <= 100) s.notifyVolume = volume;
+                    }
                     else if (k.StartsWith("notify.") && DisplayPolicy.ValidSlot(k.Substring(7))) s.accountLevels[k.Substring(7)] = ParseLevel(v);
                     else if (k == "language")
                     {
@@ -1052,6 +1069,7 @@ namespace QuotaTrayApp
                 string text = "# 额度提醒档位：off / low / medium / high" + Environment.NewLine
                             + "notifyLevel=" + Key() + Environment.NewLine
                             + "notifySound=" + (notifySound ? "true" : "false") + Environment.NewLine
+                            + "notifyVolume=" + notifyVolume + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
                             + "language=" + language + Environment.NewLine
                             + "# 找不到 Codex 时可手填 codex.exe 完整路径" + Environment.NewLine
@@ -2414,7 +2432,7 @@ namespace QuotaTrayApp
                     AccountsLoading = accountDiscoveryPending, DesktopSlot = multiAccounts == null ? "auto" : multiAccounts.DesktopPreference,
                     CodexMissing = !settings.HasCodex, AccountReadError = multiDiscoveryError,
                     Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel,
-                    NotifySound = settings.notifySound, AutoStart = IsAutoStartEnabled() };
+                    NotifySound = settings.notifySound, NotifyVolume = settings.notifyVolume, AutoStart = IsAutoStartEnabled() };
             };
             actions.ConnectAccounts = delegate { ShowAccountConnections(); };
             actions.RefreshAll = delegate { if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
@@ -2433,6 +2451,13 @@ namespace QuotaTrayApp
                 if (!enabled) StopToastSound();
                 return true;
             };
+            actions.SetNotifyVolume = delegate(int volume)
+            {
+                if (!settings.SetNotifyVolume(root, volume)) return false;
+                if (volume == 0) StopToastSound();
+                return true;
+            };
+            actions.TestNotifyVolume = delegate(int volume) { PlayNotifySample(root, volume, Log); };
             actions.SetLanguage = delegate(string language) { SetLanguage(language); if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Reload(); };
             actions.SetTheme = delegate(string theme) { settings.theme = UiTheme.Normalize(theme); settings.Save(root); UiTheme.Set(settings.theme); };
             actions.SetAutoStart = delegate(bool enabled) { return SetAutoStart(enabled); };
@@ -2914,7 +2939,7 @@ namespace QuotaTrayApp
                     toast = null;
                 }
                 toast = new ToastForm(title, body, slot, emailMask, compact);
-                AttachToastSound(toast, root, soundFile, Log, settings.notifySound);
+                AttachToastSound(toast, root, soundFile, Log, settings.notifySound, settings.notifyVolume);
                 toast.Show();
             }
             catch (Exception ex)
@@ -2931,49 +2956,75 @@ namespace QuotaTrayApp
             fallbackToastSound = null;
         }
 
-        internal static void AttachToastSound(ToastForm form, string dir, string soundFile, Action<string> report, bool enabled = true)
+        internal static void AttachToastSound(ToastForm form, string dir, string soundFile, Action<string> report,
+            bool enabled = true, int volume = AppSettings.DefaultNotifyVolume)
         {
-            if (!enabled) return;
+            if (enabled && volume > 0) form.SynchronizeSlideIn = PrepareToastSound(dir, soundFile, volume, report);
+        }
+
+        internal static void PlayNotifySample(string dir, int volume, Action<string> report)
+        {
+            if (volume == 0) { StopToastSound(); return; }
+            Action<Action> play = PrepareToastSound(dir, "notify.wav", volume, report);
+            if (play != null) play(null);
+        }
+
+        private static Action<Action> PrepareToastSound(string dir, string soundFile, int volume, Action<string> report)
+        {
             try
             {
                 System.Media.SoundPlayer player = LoadNotifySound(dir, soundFile);
-                if (player == null) return;
+                if (player == null) return null;
                 ToastSound.Format format;
-                player.Stream.Position = 0;
-                byte[] samples;
-                using (var source = new MemoryStream())
+                byte[] samples = CopyToastPcm(player, out format);
+                if (volume < 100 && samples == null)
                 {
-                    player.Stream.CopyTo(source);
-                    source.Position = 0;
-                    samples = ToastSound.ReadPcm(source, out format);
+                    // Use the same built-in alert if a custom WAV cannot be attenuated as PCM.
+                    player = LoadNotifySound(dir, soundFile, true);
+                    if (player != null) samples = CopyToastPcm(player, out format);
+                    if (samples == null) throw new InvalidOperationException("No adjustable PCM alert is available.");
                 }
-                form.SynchronizeSlideIn = delegate(Action slideIn)
+                if (samples != null) ToastSound.ScalePcm(samples, format, volume);
+                return delegate(Action slideIn)
                 {
                     try
                     {
+                        StopToastSound();
                         if (samples != null && ToastSound.TryPlay(format, samples, slideIn)) return;
-                        player.Play();
-                        fallbackToastSound = player;
+                        fallbackToastSound = volume == 100 ? player : new System.Media.SoundPlayer(ToastSound.PcmWave(format, samples));
+                        fallbackToastSound.Play();
                     }
                     catch (Exception ex) { report("提示音失败：" + ex.Message); }
-                    slideIn();
+                    if (slideIn != null) slideIn();
                 };
             }
             catch (Exception ex)
             {
                 report("提示音失败：" + ex.Message);
+                return null;
+            }
+        }
+
+        private static byte[] CopyToastPcm(System.Media.SoundPlayer player, out ToastSound.Format format)
+        {
+            player.Stream.Position = 0;
+            using (var source = new MemoryStream())
+            {
+                player.Stream.CopyTo(source);
+                source.Position = 0;
+                return ToastSound.ReadPcm(source, out format);
             }
         }
 
         internal const string RecoverySound = "notify-restored.wav";
         internal static readonly string[] NotifySoundFiles = new string[] { "notify.wav", "notify-5h-empty.wav", "notify-7d-empty.wav", RecoverySound };
-        internal static System.Media.SoundPlayer LoadNotifySound(string dir,string soundFile)
+        internal static System.Media.SoundPlayer LoadNotifySound(string dir,string soundFile,bool embeddedOnly=false)
         {
             string requested=String.IsNullOrEmpty(soundFile)?"notify.wav":soundFile;
             string path=Path.Combine(dir,requested);
             string key=path;
             Stream stream=null;
-            bool fromFile = File.Exists(path);
+            bool fromFile = !embeddedOnly && File.Exists(path);
             if (!fromFile) key = "resource:" + requested;
             if (players == null) players = new System.Collections.Generic.Dictionary<string,System.Media.SoundPlayer>();
             System.Media.SoundPlayer player;
@@ -2981,7 +3032,7 @@ namespace QuotaTrayApp
             stream = fromFile ? new MemoryStream(File.ReadAllBytes(path), false) :
                 Assembly.GetExecutingAssembly().GetManifestResourceStream(requested);
             if (stream == null)
-                return requested == "notify.wav" ? null : LoadNotifySound(dir, "notify.wav");
+                return requested == "notify.wav" ? null : LoadNotifySound(dir, "notify.wav", embeddedOnly);
             player = new System.Media.SoundPlayer(stream);
             player.Load(); players[key]=player; return player;
         }
@@ -3842,7 +3893,7 @@ namespace QuotaTrayApp
 
             using (ToastForm form = new ToastForm(L.T("额度提醒"), body, slot, "22***@example.com", restored))
             {
-                AttachToastSound(form, dir, sound, Console.Error.WriteLine, prefs.notifySound);
+                AttachToastSound(form, dir, sound, Console.Error.WriteLine, prefs.notifySound, prefs.notifyVolume);
                 Application.Run(form);
             }
         }

@@ -93,8 +93,9 @@ namespace QuotaTrayApp
                     }
                     else if (tag == 0x61746164) // data
                     {
-                        if (format.Tag != 1 || format.BitsPerSample != 16 || format.Channels == 0 ||
-                            format.BlockAlign != format.Channels * 2 || format.Rate == 0 || format.Rate > 192000 ||
+                        if (format.Tag != 1 || (format.BitsPerSample != 8 && format.BitsPerSample != 16 &&
+                            format.BitsPerSample != 24 && format.BitsPerSample != 32) || format.Channels == 0 ||
+                            format.BlockAlign != format.Channels * (format.BitsPerSample / 8) || format.Rate == 0 || format.Rate > 192000 ||
                             format.BytesPerSecond != format.Rate * format.BlockAlign ||
                             size > int.MaxValue || size == 0 || size % format.BlockAlign != 0) return null;
                         return reader.ReadBytes((int)size);
@@ -103,6 +104,56 @@ namespace QuotaTrayApp
                 }
             }
             return null;
+        }
+
+        internal static void ScalePcm(byte[] samples, Format format, int volume)
+        {
+            if (volume == 100) return;
+            int width = format.BitsPerSample / 8;
+            if (width == 1)
+            {
+                for (int i = 0; i < samples.Length; i++)
+                    samples[i] = (byte)(128 + (samples[i] - 128) * volume / 100);
+                return;
+            }
+            for (int i = 0; i < samples.Length; i += width)
+            {
+                int last = i + width - 1;
+                int value = (sbyte)samples[last];
+                for (int index = last - 1; index >= i; index--) value = (value << 8) | samples[index];
+                int adjusted = (int)((long)value * volume / 100);
+                for (int index = i; index <= last; index++)
+                {
+                    samples[index] = (byte)adjusted;
+                    adjusted >>= 8;
+                }
+            }
+        }
+
+        internal static Stream PcmWave(Format format, byte[] samples)
+        {
+            int padding = samples.Length & 1;
+            var stream = new MemoryStream(44 + samples.Length + padding);
+            using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true))
+            {
+                writer.Write(0x46464952u); // RIFF
+                writer.Write(36 + samples.Length + padding);
+                writer.Write(0x45564157u); // WAVE
+                writer.Write(0x20746d66u); // fmt
+                writer.Write(16);
+                writer.Write(format.Tag);
+                writer.Write(format.Channels);
+                writer.Write(format.Rate);
+                writer.Write(format.BytesPerSecond);
+                writer.Write(format.BlockAlign);
+                writer.Write(format.BitsPerSample);
+                writer.Write(0x61746164u); // data
+                writer.Write(samples.Length);
+                writer.Write(samples);
+                if (padding != 0) writer.Write((byte)0);
+            }
+            stream.Position = 0;
+            return stream;
         }
 
         internal static void Stop()
@@ -120,7 +171,10 @@ namespace QuotaTrayApp
                 Check(waveOutPause(playback.device));
                 // Queue both buffers before restarting so the device can move straight from warm-up to the sound.
                 int leadFrames = (int)(format.Rate * LeadInMs / 1000);
-                playback.leadIn.Queue(playback.device, new byte[leadFrames * format.BlockAlign]);
+                var silence = new byte[leadFrames * format.BlockAlign];
+                if (format.BitsPerSample == 8)
+                    for (int i = 0; i < silence.Length; i++) silence[i] = 128;
+                playback.leadIn.Queue(playback.device, silence);
                 playback.sound.Queue(playback.device, samples);
                 Check(waveOutRestart(playback.device));
                 playback.cleanupAfter = (long)samples.Length * 1000 / format.BytesPerSecond + StartTimeoutMs + 1000;
