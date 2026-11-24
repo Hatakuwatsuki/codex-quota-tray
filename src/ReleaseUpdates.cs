@@ -44,6 +44,7 @@ namespace QuotaTrayApp
     {
         internal const string Repository = "Hatakuwatsuki/codex-quota-tray";
         internal const string HelperName = "QuotaDisplayUpdate.exe";
+        internal const string UpdatedMarkerName = "release-updated.txt";
         internal static readonly TimeSpan AutomaticInterval = TimeSpan.FromHours(1);
         private const int MaxAssetSize = 32 * 1024 * 1024;
         private const int MaxMetadataSize = 256 * 1024;
@@ -57,6 +58,11 @@ namespace QuotaTrayApp
         private DateTime lastCheck;
         private ReleaseAsset asset;
         private Version lastNotified;
+        private Version autoAttempted;
+        private string stagedFile;
+        private Version stagedVersion;
+        private bool autoDownloading;
+        private bool autoInstalled;
 
         internal ReleaseUpdates(string executable, string root, Action<string> log)
         {
@@ -123,6 +129,162 @@ namespace QuotaTrayApp
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
             return found;
+        }
+
+        internal static Version ConsumeUpdatedVersion(string root)
+        {
+            if (String.IsNullOrEmpty(root)) return null;
+            string mark = Path.Combine(root, UpdatedMarkerName);
+            if (!File.Exists(mark)) return null;
+            string raw = null;
+            try
+            {
+                raw = File.ReadAllText(mark).Trim();
+                File.Delete(mark);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            Version parsed;
+            return !String.IsNullOrEmpty(raw) && Version.TryParse(raw, out parsed) ? parsed : null;
+        }
+
+        internal static bool ShouldStartAutoDownload(bool autoEnabled, UpdateStatus status, ReleaseAsset available,
+            Version attempted, Version staged, bool downloading, bool installed)
+        {
+            return autoEnabled && !downloading && !installed && status != null && !status.Busy &&
+                status.Phase == UpdatePhase.Available && available != null &&
+                (staged == null || available.Version > staged) &&
+                (attempted == null || available.Version > attempted);
+        }
+
+        internal static bool CanRunAutoInstall(bool autoEnabled, bool uiBusy, UpdateStatus status,
+            Version currentVersion, Version staged, string file, bool downloading, bool installed)
+        {
+            return autoEnabled && !uiBusy && !downloading && !installed && status != null && !status.Busy &&
+                staged != null && currentVersion != null && staged > currentVersion &&
+                !String.IsNullOrEmpty(file) && File.Exists(file);
+        }
+
+        internal void StartAutoDownload(bool autoEnabled)
+        {
+            ReleaseAsset selected;
+            lock (gate)
+            {
+                if (!ShouldStartAutoDownload(autoEnabled, state, asset, autoAttempted, stagedVersion, autoDownloading, autoInstalled))
+                    return;
+                selected = asset;
+                autoAttempted = selected.Version;
+                autoDownloading = true;
+                state = new UpdateStatus(UpdatePhase.Downloading, selected.Version);
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string file = Path.Combine(cache, "CodexQuotaTray-" + selected.Version + ".exe");
+                try
+                {
+                    Directory.CreateDirectory(cache);
+                    if ((File.GetAttributes(cache) & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("The update cache is a redirected directory.");
+                    DeleteDownload(file);
+                    Download(selected, file);
+                    lock (gate)
+                    {
+                        autoDownloading = false;
+                        stagedFile = file;
+                        stagedVersion = selected.Version;
+                        state = new UpdateStatus(UpdatePhase.Available, selected.Version);
+                    }
+                }
+                catch (Exception error)
+                {
+                    DeleteDownload(file);
+                    Report(error);
+                    lock (gate)
+                    {
+                        autoDownloading = false;
+                        state = new UpdateStatus(UpdatePhase.InstallFailed, selected.Version);
+                    }
+                }
+            });
+        }
+
+        internal bool TryAutoInstall(bool autoEnabled, bool uiBusy)
+        {
+            Version targetVersion;
+            string file;
+            lock (gate)
+            {
+                if (!CanRunAutoInstall(autoEnabled, uiBusy, state, current, stagedVersion, stagedFile, autoDownloading, autoInstalled))
+                    return false;
+                autoInstalled = true;
+                targetVersion = stagedVersion;
+                file = stagedFile;
+                state = new UpdateStatus(UpdatePhase.Installing, targetVersion);
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    Directory.CreateDirectory(cache);
+                    if ((File.GetAttributes(cache) & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("The update cache is a redirected directory.");
+                    string helper = Path.Combine(cache, HelperName);
+                    File.Copy(executable, helper, true);
+                    string arguments = "--update-silent \"" + executable + "\" \"" + file + "\" \"" + targetVersion + "\"";
+                    using (Process next = Process.Start(new ProcessStartInfo(helper, arguments)
+                        { WorkingDirectory = cache, UseShellExecute = false }))
+                    {
+                        if (next == null) throw new IOException("Could not start the silent update.");
+                        next.WaitForExit();
+                        throw new IOException("The update closed before the running copy was replaced.");
+                    }
+                }
+                catch (Exception error)
+                {
+                    DeleteDownload(file);
+                    Report(error);
+                    lock (gate)
+                    {
+                        autoInstalled = false;
+                        stagedFile = null;
+                        stagedVersion = null;
+                        state = new UpdateStatus(UpdatePhase.InstallFailed, targetVersion);
+                    }
+                }
+            });
+            return true;
+        }
+
+        internal static void RunSilent(string helper, string target, string file, string versionText)
+        {
+            Version nextVersion;
+            if (String.IsNullOrEmpty(helper) || String.IsNullOrEmpty(target) || String.IsNullOrEmpty(file) ||
+                String.IsNullOrEmpty(versionText) || !Version.TryParse(versionText, out nextVersion))
+                return;
+            Version previous = Path.IsPathRooted(target) ? PortableUpgrade.ReadVersion(target) : null;
+            if (Path.GetFileName(helper) != HelperName || previous == null ||
+                previous != typeof(ReleaseUpdates).Assembly.GetName().Version || nextVersion <= previous)
+                return;
+            string directory = Path.GetDirectoryName(helper);
+            try
+            {
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
+                string fullDir = Path.GetFullPath(directory);
+                if (!fullDir.EndsWith(Path.DirectorySeparatorChar.ToString())) fullDir += Path.DirectorySeparatorChar;
+                string fullFile = Path.GetFullPath(file);
+                if (!fullFile.StartsWith(fullDir, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullFile)) return;
+                if (PortableUpgrade.ReadVersion(fullFile) != nextVersion) return;
+                string rootDir = Path.GetDirectoryName(Path.GetDirectoryName(helper));
+                string updatedMark = Path.Combine(rootDir, UpdatedMarkerName);
+                PortableUpgrade.ApplyVerified(fullFile, target, previous, delegate
+                {
+                    try { File.WriteAllText(updatedMark, nextVersion.ToString()); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                });
+            }
+            catch { }
+            finally { DeleteDownload(file); }
         }
 
         internal void Install()

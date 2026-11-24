@@ -18,6 +18,7 @@ namespace QuotaTrayApp
         internal int DefaultNotifyLevel;
         internal bool NotifySound = true;
         internal int NotifyVolume = AppSettings.DefaultNotifyVolume;
+        internal bool AutoUpdate = true;
         internal bool AutoStart, AccountsLoading, CodexMissing;
     }
     internal sealed class SettingsActions
@@ -31,7 +32,7 @@ namespace QuotaTrayApp
         internal Func<int, bool> SetNotifyVolume;
         internal Action<int> TestNotifyVolume;
         internal Action<string> SetLanguage, SetTheme;
-        internal Func<bool, bool> SetAutoStart;
+        internal Func<bool, bool> SetAutoStart, SetAutoUpdate;
         internal Func<UpdateStatus> ReadUpdate;
         internal Action CheckUpdate, ApplyUpdate;
         internal Func<Version> ReadVersion;
@@ -145,6 +146,7 @@ namespace QuotaTrayApp
             { "账号提醒档位", new string[] { "アカウント別の通知レベル", "Account alert levels" } },
             { "语言", new string[] { "言語", "Language" } },
             { "开机启动", new string[] { "Windowsの起動時に開始", "Start with Windows" } },
+            { "有更新时自动更新", new string[] { "更新時に自動アップデート", "Update automatically" } },
             { "创建桌面快捷方式", new string[] { "デスクトップにショートカットを作成", "Create desktop shortcut" } },
             { "手动选择 Codex", new string[] { "Codexを手動で選択", "Choose Codex manually" } },
             { "退出程序", new string[] { "アプリを終了", "Exit application" } }
@@ -511,18 +513,20 @@ namespace QuotaTrayApp
                 if (!QuotaMeter.Valid(window)) continue;
                 if (QuotaWindow.IsLong(window.windowMins)) longWindow = window; else shortWindow = window;
             }
+            bool longExhausted = longWindow != null && QuotaWindow.Remaining(longWindow.used) <= 0;
             int count = shortWindow != null && longWindow != null ? 2 : 1;
             changed |= row.Controls.Count != count;
             while (row.Controls.Count > count) row.Controls[row.Controls.Count - 1].Dispose();
             for (int i = 0; i < count; i++)
             {
                 WindowInfo window = i == 0 && shortWindow != null ? shortWindow : longWindow;
+                bool superseded = window != null && window == shortWindow && longExhausted;
                 string title = window == null ? L.T("正在读取额度…") : window == shortWindow ? L.T("5 小时额度") :
                     L.F("{0} 天额度", QuotaWindow.Days(window.windowMins));
-                if (i < row.Controls.Count) ((QuotaMeter)row.Controls[i]).UpdateQuota(window, title);
+                if (i < row.Controls.Count) ((QuotaMeter)row.Controls[i]).UpdateQuota(window, title, superseded);
                 else
                 {
-                    var meter = new QuotaMeter(window, title);
+                    var meter = new QuotaMeter(window, title, superseded);
                     meter.BackColor = row.BackColor;
                     row.Controls.Add(meter);
                 }
@@ -811,6 +815,7 @@ namespace QuotaTrayApp
             inner.Controls.Add(language);
             FlowLayoutPanel row = Row();
             CheckBox startup = new UiCheckBox(); startup.Name = "auto-start"; startup.Text = T("开机启动"); startup.AutoSize = true; startup.Checked = snapshot.AutoStart;
+            startup.Margin = new Padding(0, S(3), 0, S(3));
             bool changingStartup = false;
             startup.CheckedChanged += delegate {
                 if (changingStartup) return;
@@ -835,6 +840,33 @@ namespace QuotaTrayApp
                 Label heading = TextLine("软件更新", true);
                 heading.Margin = new Padding(0, 0, 0, S(8));
                 inner.Controls.Add(heading);
+                FlowLayoutPanel autoRow = Row();
+                autoRow.Margin = new Padding(0, 0, 0, LayoutGap);
+                var autoUpdate = new UiCheckBox
+                {
+                    Name = "auto-update",
+                    Text = T("有更新时自动更新"),
+                    AutoSize = true,
+                    Checked = snapshot.AutoUpdate,
+                    Enabled = actions.SetAutoUpdate != null,
+                    Margin = new Padding(0)
+                };
+                bool changingAutoUpdate = false;
+                autoUpdate.CheckedChanged += delegate
+                {
+                    if (changingAutoUpdate) return;
+                    bool requested = autoUpdate.Checked;
+                    if (actions.SetAutoUpdate != null && actions.SetAutoUpdate(requested))
+                        snapshot.AutoUpdate = requested;
+                    else
+                    {
+                        changingAutoUpdate = true;
+                        autoUpdate.Checked = !requested;
+                        changingAutoUpdate = false;
+                    }
+                };
+                autoRow.Controls.Add(autoUpdate);
+                inner.Controls.Add(autoRow);
                 checkUpdateButton = Button("检查更新", false, delegate { Call(actions.CheckUpdate); RefreshReleaseStatus(); });
                 checkUpdateButton.Name = "check-update";
                 inner.Controls.Add(checkUpdateButton);
@@ -1525,11 +1557,11 @@ namespace QuotaTrayApp
         }
         internal static Color QuotaInk(double remaining)
         {
-            if (remaining < 0) return Dark ? Color.FromArgb(245, 247, 250) : Color.FromArgb(104, 116, 128);
-            if (remaining <= 0) return Dark ? Color.FromArgb(255, 244, 243) : Color.FromArgb(148, 18, 30);
-            if (remaining <= 25) return Dark ? Color.FromArgb(255, 242, 248) : Color.FromArgb(178, 44, 60);
-            if (remaining < 75) return Dark ? Color.FromArgb(255, 246, 213) : Color.FromArgb(146, 98, 8);
-            return Dark ? Color.FromArgb(224, 255, 239) : Color.FromArgb(18, 118, 80);
+            if (remaining < 0) return Dark ? Color.FromArgb(196, 204, 216) : Color.FromArgb(104, 116, 128);
+            if (remaining <= 0) return Dark ? Color.FromArgb(255, 84, 94) : Color.FromArgb(148, 18, 30);
+            if (remaining <= 25) return Dark ? Color.FromArgb(255, 110, 110) : Color.FromArgb(178, 44, 60);
+            if (remaining < 75) return Dark ? Color.FromArgb(248, 196, 64) : Color.FromArgb(146, 98, 8);
+            return Dark ? Color.FromArgb(72, 222, 142) : Color.FromArgb(18, 118, 80);
         }
         internal static void Card(Graphics g, Rectangle r, Color fill, Color border, bool gammaCorrect = true)
         {
@@ -2066,21 +2098,53 @@ namespace QuotaTrayApp
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
-            float s=UiTheme.DpiScaleOf(this);
-            int tw=UiTheme.S(36,s), th=UiTheme.S(20,s), pad=UiTheme.S(3,s), ks=UiTheme.S(14,s), textLeft=UiTheme.S(48,s);
-            Rectangle track=new Rectangle(pad,(Height-th)/2,tw,th);
-            Color off=UiTheme.Blend(BackColor,UiTheme.Dark?Color.White:Color.Black,UiTheme.Dark?47:64);
-            Color on=UiTheme.Blend(BackColor,UiTheme.AccountColor(Tag as string),210);
-            if(!Enabled) { off=UiTheme.Blend(BackColor,UiTheme.Dark?Color.White:Color.Black,25); on=UiTheme.Blend(BackColor,UiTheme.AccountColor(Tag as string),105); }
-            Color fill=UiTheme.Blend(off,on,(int)(position*255));
-            using(GraphicsPath path=UiTheme.Round(track,th/2f))using(LinearGradientBrush brush=new LinearGradientBrush(track,ControlPaint.Light(fill,.12f),fill,90))
-            {e.Graphics.FillPath(brush,path);using(Pen edge=new Pen(UiTheme.Border,1))e.Graphics.DrawPath(edge,path);}
-            Rectangle knob=new Rectangle(track.Left+pad+(int)Math.Round(position*Math.Max(1,tw-ks-pad*2)),track.Top+pad,ks,ks);
-            using(Brush shadow=new SolidBrush(Color.FromArgb(60,0,0,0)))e.Graphics.FillEllipse(shadow,knob.X,knob.Y+1,knob.Width,knob.Height);
-            using(LinearGradientBrush brush=new LinearGradientBrush(knob,Color.White,Color.FromArgb(219,224,229),90))e.Graphics.FillEllipse(brush,knob);
-            UiTheme.DrawText(this,e.Graphics,Text,Font,new Rectangle(textLeft,0,Width-textLeft,Height),Enabled?UiTheme.TextColor:UiTheme.Muted,TextFormatFlags.Left|TextFormatFlags.VerticalCenter|TextFormatFlags.SingleLine);
-            if(Focused&&UiInput.Keyboard)UiTheme.Focus(e.Graphics,ClientRectangle);
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            float s = UiTheme.DpiScaleOf(this);
+            int tw = UiTheme.S(36, s), th = UiTheme.S(20, s), pad = UiTheme.S(3, s), ks = UiTheme.S(14, s), textLeft = UiTheme.S(48, s);
+            // The track starts on the control's left edge so every switch lines up with the
+            // card content guide (dropdowns, sliders, headings) instead of sitting 3 DIP in.
+            Rectangle track = new Rectangle(0, (Height - th) / 2, tw, th);
+            Color accent = UiTheme.AccountColor(Tag as string);
+            Color offTop, offBottom, offEdge, onTop, onBottom, onEdge;
+            if (UiTheme.Dark)
+            {
+                Color off = UiTheme.Blend(BackColor, Color.White, Enabled ? 47 : 25);
+                offTop = ControlPaint.Light(off, .10f);
+                offBottom = off;
+                offEdge = Color.FromArgb(Enabled ? 190 : 120, UiTheme.Border);
+                Color on = UiTheme.Blend(BackColor, accent, Enabled ? 210 : 105);
+                onTop = ControlPaint.Light(on, .10f);
+                onBottom = on;
+                onEdge = Color.FromArgb(Enabled ? 160 : 88, UiTheme.Blend(on, Color.Black, 38));
+            }
+            else
+            {
+                offTop = Color.FromArgb(Enabled ? 128 : 78, 178, 190, 200);
+                offBottom = Color.FromArgb(Enabled ? 152 : 90, 148, 162, 176);
+                offEdge = Color.FromArgb(Enabled ? 115 : 64, 42, 54, 68);
+                onTop = Color.FromArgb(Enabled ? 242 : 136, UiTheme.Blend(accent, Color.White, 16));
+                onBottom = Color.FromArgb(Enabled ? 242 : 136, UiTheme.Blend(accent, Color.Black, 16));
+                onEdge = Color.FromArgb(Enabled ? 210 : 112, UiTheme.Blend(accent, Color.Black, 28));
+            }
+            UiTheme.PaintGlassSurface(e.Graphics, track, BlendArgb(offTop, onTop, position),
+                BlendArgb(offBottom, onBottom, position), BlendArgb(offEdge, onEdge, position), th / 2f);
+            Rectangle knob = new Rectangle(track.Left + pad + (int)Math.Round(position * Math.Max(1, tw - ks - pad * 2)), track.Top + pad, ks, ks);
+            using (Brush shadow = new SolidBrush(Color.FromArgb(Enabled ? 60 : 30, 0, 0, 0)))
+                e.Graphics.FillEllipse(shadow, knob.X, knob.Y + 1, knob.Width, knob.Height);
+            Color knobBottom = UiTheme.Dark ? Color.FromArgb(219, 224, 229) : Color.FromArgb(236, 240, 244);
+            using (LinearGradientBrush brush = new LinearGradientBrush(knob, Color.White, knobBottom, 90))
+                e.Graphics.FillEllipse(brush, knob);
+            UiTheme.DrawText(this, e.Graphics, Text, Font, new Rectangle(textLeft, 0, Width - textLeft, Height),
+                Enabled ? UiTheme.TextColor : UiTheme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            if (Focused && UiInput.Keyboard) UiTheme.Focus(e.Graphics, ClientRectangle);
+        }
+        private static Color BlendArgb(Color a, Color b, float t)
+        {
+            int k = (int)Math.Round(Math.Max(0f, Math.Min(1f, t)) * 255f);
+            return Color.FromArgb((a.A * (255 - k) + b.A * k) / 255, (a.R * (255 - k) + b.R * k) / 255,
+                (a.G * (255 - k) + b.G * k) / 255, (a.B * (255 - k) + b.B * k) / 255);
         }
         protected override void Dispose(bool disposing){if(disposing)timer.Dispose();base.Dispose(disposing);}
     }
@@ -2369,24 +2433,27 @@ namespace QuotaTrayApp
     {
         private WindowInfo quota;
         private string title, reset;
+        private bool superseded;
         private Font largeFont;
         private FontFamily largeFontFamily;
         internal static bool Valid(WindowInfo w) { return w!=null && !Double.IsNaN(w.used) && !Double.IsInfinity(w.used) && w.used>=0 && w.used<=100 && w.windowMins>0; }
-        internal QuotaMeter(WindowInfo quota,string title)
+        internal QuotaMeter(WindowInfo quota, string title, bool superseded = false)
         {
             float s=UiTheme.SystemDpiScale();
             Name="quota-meter"; Size=new Size(UiTheme.S(420,s),UiTheme.S(92,s)); Margin=new Padding(0);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw,true);
             AccessibleRole = AccessibleRole.Graphic;
-            UpdateQuota(quota, title);
+            UpdateQuota(quota, title, superseded);
         }
 
-        internal void UpdateQuota(WindowInfo window, string label)
+        internal void UpdateQuota(WindowInfo window, string label, bool superseded = false)
         {
             if (!Valid(window)) window = null;
+            bool nextSuperseded = window != null && superseded;
             string nextReset = window == null ? L.T("暂无") : TrayContext.MultiTooltipCountdown(window.resetsAt);
-            if (title == label && reset == nextReset && (quota == null ? window == null : window != null && quota.used == window.used)) return;
-            quota = window; title = label; reset = nextReset;
+            if (title == label && reset == nextReset && this.superseded == nextSuperseded &&
+                (quota == null ? window == null : window != null && quota.used == window.used)) return;
+            quota = window; title = label; reset = nextReset; this.superseded = nextSuperseded;
             Text = title + " · " + (quota == null ? L.T("暂无") : L.F("剩余 {0}%", QuotaWindow.Remaining(quota.used)));
             AccessibleName = Text;
             Invalidate();
@@ -2396,8 +2463,9 @@ namespace QuotaTrayApp
             UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle, Parent == null ? UiTheme.Surface : Parent.BackColor);
             float s=UiTheme.DpiScaleOf(this);
             int remaining=quota==null ? 0 : QuotaWindow.Remaining(quota.used);
-            Color color=quota==null ? UiTheme.Muted : UiTheme.QuotaColor(remaining);
-            UiTheme.DrawText(this,e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,UiTheme.S(20,s)),UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            Color color = quota == null ? UiTheme.Muted : superseded ? (UiTheme.Dark ? Color.FromArgb(102, 110, 122) : Color.FromArgb(158, 168, 178)) : UiTheme.QuotaColor(remaining);
+            Color mutedInk = superseded ? (UiTheme.Dark ? Color.FromArgb(128, 136, 148) : Color.FromArgb(106, 114, 124)) : (UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted);
+            UiTheme.DrawText(this,e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,UiTheme.S(20,s)),mutedInk,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
             string amount=quota==null ? "—" : remaining+"%";
             if (largeFont == null || !Equals(largeFontFamily, Font.FontFamily))
             {
@@ -2405,10 +2473,26 @@ namespace QuotaTrayApp
                 largeFontFamily = Font.FontFamily;
                 largeFont = new Font(largeFontFamily, 22f, FontStyle.Bold);
             }
-            UiTheme.DrawText(this,e.Graphics,amount,largeFont,new Rectangle(0,UiTheme.S(19,s),Width,UiTheme.S(40,s)),UiTheme.TextColor,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            Rectangle amountRect = new Rectangle(0, UiTheme.S(19, s), Width, UiTheme.S(40, s));
+            Color amountColor = superseded ? mutedInk : (quota != null && remaining <= 0 ? UiTheme.QuotaInk(0) : UiTheme.TextColor);
+            UiTheme.DrawText(this, e.Graphics, amount, largeFont, amountRect, amountColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            if (superseded && quota != null)
+            {
+                float textWidth;
+                if (UiTheme.IsGlass(this))
+                    using (var fmt = new StringFormat(StringFormat.GenericTypographic))
+                        textWidth = e.Graphics.MeasureString(amount, largeFont, PointF.Empty, fmt).Width;
+                else
+                    textWidth = TextRenderer.MeasureText(e.Graphics, amount, largeFont, amountRect.Size, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+                float strikeY = (float)Math.Round(amountRect.Top + amountRect.Height * 0.50f) + 0.5f;
+                Color strikeColor = UiTheme.Dark ? Color.FromArgb(215, 144, 152, 164) : Color.FromArgb(210, 92, 100, 110);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var strikePen = new Pen(strikeColor, Math.Max(1.8f, 2f * s)))
+                    e.Graphics.DrawLine(strikePen, amountRect.Left, strikeY, Math.Min(amountRect.Right, amountRect.Left + textWidth + UiTheme.S(2, s)), strikeY);
+            }
             Rectangle track=new Rectangle(0,UiTheme.S(61,s),Width,Math.Max(4,UiTheme.S(5,s))); UiTheme.QuotaGradient(e.Graphics,track,UiTheme.Input);
             if(quota!=null) { int filled=(int)Math.Round(track.Width*remaining/100.0); if(filled>1) UiTheme.QuotaGradient(e.Graphics,new Rectangle(track.X,track.Y,filled,track.Height),color); }
-            UiTheme.DrawText(this,e.Graphics,reset,Font,new Rectangle(0,UiTheme.S(69,s),Width,UiTheme.S(22,s)),UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            UiTheme.DrawText(this,e.Graphics,reset,Font,new Rectangle(0,UiTheme.S(69,s),Width,UiTheme.S(22,s)),mutedInk,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
         }
         protected override void Dispose(bool disposing)
         {
@@ -3515,6 +3599,7 @@ namespace QuotaTrayApp
         internal string Label;      // "5 小时" / "7 天"
         internal int Remaining;     // 0-100
         internal string Detail;     // "1 小时 45 分后恢复"
+        internal bool Superseded;   // 7 天已耗尽时，5 小时行整行调暗并划掉
         internal string QuotaText
         {
             get { return Remaining <= 0 ? L.T("已耗尽") : L.F("剩余 {0}%", Remaining); }
@@ -3769,9 +3854,9 @@ namespace QuotaTrayApp
         // segment gets trimmed by a few pixels.
         private static float MeasureRow(Graphics g, Font font, QuotaTipLine line, StringFormat format)
         {
-            using (Font rowFont = new Font(font, line.Remaining == 0 ? FontStyle.Bold : FontStyle.Regular))
+            using (Font rowFont = new Font(font, line.Remaining == 0 && !line.Superseded ? FontStyle.Bold : FontStyle.Regular))
             {
-                if (line.Remaining <= 0) return g.MeasureString(line.Render(), rowFont, PointF.Empty, format).Width;
+                if (line.Remaining <= 0 || line.Superseded) return g.MeasureString(line.Render(), rowFont, PointF.Empty, format).Width;
                 float width = g.MeasureString(line.Label + " ", rowFont, PointF.Empty, format).Width;
                 width += g.MeasureString(line.QuotaText, rowFont, PointF.Empty, format).Width;
                 if (!String.IsNullOrEmpty(line.Detail)) width += g.MeasureString("｜" + line.Detail, rowFont, PointF.Empty, format).Width;
@@ -3822,11 +3907,26 @@ namespace QuotaTrayApp
                     foreach (QuotaTipLine line in lines)
                     {
                         RectangleF row = new RectangleF(x, y, width, scale(RowHeight));
-                        bool exhausted = line.Remaining == 0;
+                        bool exhausted = line.Remaining == 0 && !line.Superseded;
                         bool unknown = line.Remaining < 0;
                         using (Font rowFont = new Font(font, exhausted ? FontStyle.Bold : FontStyle.Regular))
                         {
-                            if (exhausted || unknown)
+                            if (line.Superseded)
+                            {
+                                // Long window is exhausted: dim the 5-hour row and strike through with one smooth line.
+                                string rendered = line.Render();
+                                Color dimText = UiTheme.Dark ? Color.FromArgb(128, 136, 148) : Color.FromArgb(106, 114, 124);
+                                Color strikeColor = UiTheme.Dark ? Color.FromArgb(200, 144, 152, 164) : Color.FromArgb(200, 92, 100, 110);
+                                using (var dimBrush = new SolidBrush(dimText))
+                                using (var strikePen = new Pen(strikeColor, Math.Max(1.1f, 1.2f * dpi / 96f)))
+                                {
+                                    g.DrawString(rendered, rowFont, dimBrush, row, format);
+                                    float textW = g.MeasureString(rendered, rowFont, PointF.Empty, format).Width;
+                                    float midY = (float)Math.Round(row.Top + row.Height * 0.50f) + 0.5f;
+                                    g.DrawLine(strikePen, row.Left - 1f, midY, Math.Min(row.Right, row.Left + textW - 2f), midY);
+                                }
+                            }
+                            else if (exhausted || unknown)
                             {
                                 // Exhausted keeps the whole line red; unknown stays neutral.
                                 using (var rowInk = new SolidBrush(UiTheme.QuotaInk(line.Remaining)))

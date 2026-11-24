@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.47.0")]
+[assembly: AssemblyVersion("1.9.54.0")]
 
 namespace QuotaTrayApp
 {
@@ -122,7 +122,7 @@ namespace QuotaTrayApp
                 UiTheme.RefreshSystem();
                 L.AutoDetect();
                 UiQuotaTip.ShowPreview("账号 1  |  Plus", new QuotaTipLine[] {
-                    new QuotaTipLine { Label = L.T("5 小时"), Remaining = 91, Detail = L.T("1 小时 45 分后恢复") },
+                    new QuotaTipLine { Label = L.T("5 小时"), Remaining = 91, Detail = L.T("1 小时 45 分后恢复"), Superseded = true },
                     new QuotaTipLine { Label = L.F("{0} 天", 7), Remaining = 0, Detail = L.T("18 小时 5 分后恢复") }
                 }, 6000);
                 return;
@@ -210,6 +210,11 @@ namespace QuotaTrayApp
             if (args != null && args.Length == 2 && args[0] == "--update-window")
             {
                 ReleaseUpdates.RunWindow(Application.ExecutablePath, args[1]);
+                return;
+            }
+            if (args != null && args.Length == 4 && args[0] == "--update-silent")
+            {
+                ReleaseUpdates.RunSilent(Application.ExecutablePath, args[1], args[2], args[3]);
                 return;
             }
             if ((args == null || args.Length == 0) && PortableUpgrade.TryRun(Application.ExecutablePath)) return;
@@ -933,6 +938,7 @@ namespace QuotaTrayApp
         public bool notifySound = true;
         internal const int DefaultNotifyVolume = 100;
         public int notifyVolume = DefaultNotifyVolume;
+        public bool autoUpdate = true;
         public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
         public string codexPath = "";      // 手动指定或自动找到的 codex.exe
@@ -993,6 +999,15 @@ namespace QuotaTrayApp
             return false;
         }
 
+        internal bool SetAutoUpdate(string root, bool enabled)
+        {
+            bool previous = autoUpdate;
+            autoUpdate = enabled;
+            if (Save(root)) return true;
+            autoUpdate = previous;
+            return false;
+        }
+
         private static int ParseLevel(string value)
         {
             switch (value) { case "off": case "none": case "-1": return -1; case "medium": case "mid": case "1": return 1; case "high": case "2": return 2; default: return 0; }
@@ -1022,6 +1037,7 @@ namespace QuotaTrayApp
                     else if (k == "bindingsetupdone") s.bindingSetupDone = v == "true";
                     else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
                     else if (k == "notifysound" && (v == "true" || v == "false")) s.notifySound = v == "true";
+                    else if (k == "autoupdate" && (v == "true" || v == "false")) s.autoUpdate = v == "true";
                     else if (k == "notifyvolume")
                     {
                         int volume;
@@ -1070,6 +1086,7 @@ namespace QuotaTrayApp
                             + "notifyLevel=" + Key() + Environment.NewLine
                             + "notifySound=" + (notifySound ? "true" : "false") + Environment.NewLine
                             + "notifyVolume=" + notifyVolume + Environment.NewLine
+                            + "autoUpdate=" + (autoUpdate ? "true" : "false") + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
                             + "language=" + language + Environment.NewLine
                             + "# 找不到 Codex 时可手填 codex.exe 完整路径" + Environment.NewLine
@@ -1137,9 +1154,11 @@ namespace QuotaTrayApp
         public string name = "";
         public int[] thresholds = new int[0];
 
+        private const double MinUsedForRecovery = 1.0;
         private double lastUsed = -1;
         private double lastReset = -1;
         private bool emptyFired;
+        private bool usedInWindow;
         private readonly System.Collections.Generic.Dictionary<int, bool> fired =
             new System.Collections.Generic.Dictionary<int, bool>();
 
@@ -1163,14 +1182,16 @@ namespace QuotaTrayApp
             bool reset = (hasResetTimes && Math.Abs(resetsAt - lastReset) > 1) || largeDrop;
             if (reset)
             {
-                Recovered = lastUsed > used && (hasResetTimes ? resetsAt > lastReset + 1 : largeDrop);
+                Recovered = usedInWindow && lastUsed > used && (hasResetTimes ? resetsAt > lastReset + 1 : largeDrop);
                 fired.Clear();
                 emptyFired = false;
+                usedInWindow = used >= MinUsedForRecovery;
                 lastUsed = used;
                 lastReset = resetsAt;
                 return 0;
             }
 
+            if (used >= MinUsedForRecovery) usedInWindow = true;
             bool baseline = lastUsed < 0;
             double prev = lastUsed;
             lastUsed = used;
@@ -2394,7 +2415,11 @@ namespace QuotaTrayApp
                 if (!noDesktopTouch) PumpReleaseUpdates();
             };
             uiTimer.Start();
-            if (!noDesktopTouch) releaseUpdates.Check(false);
+            if (!noDesktopTouch)
+            {
+                ConsumeUpdatedNotice();
+                releaseUpdates.Check(false);
+            }
 
             worker = new Thread(WorkerLoop);
             worker.IsBackground = true;
@@ -2407,13 +2432,37 @@ namespace QuotaTrayApp
         }
 
         private void ShowDisplaySettings() { ShowSettingsPage("display"); }
+        private void ConsumeUpdatedNotice()
+        {
+            Version updated = ReleaseUpdates.ConsumeUpdatedVersion(root);
+            if (updated == null) return;
+            accountToasts.Enqueue(null, L.T("额度显示器"), L.F("已更新到 {0}", updated), NoSound, null, true, true);
+        }
+        private bool IsUiBusyForUpdate()
+        {
+            if ((quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) ||
+                (accountForm != null && !accountForm.IsDisposed) ||
+                (multiAccounts != null && multiAccounts.HasOpenWindows) ||
+                (trayMenu != null && trayMenu.PopupVisible) ||
+                (tray != null && tray.ContextMenuStrip != null && tray.ContextMenuStrip.Visible) ||
+                (quotaTip != null && !quotaTip.IsDisposed && quotaTip.Visible) ||
+                (toast != null && !toast.IsDisposed)) return true;
+            foreach (Form form in Application.OpenForms)
+                if (form != null && !form.IsDisposed && form.Visible) return true;
+            return false;
+        }
         private void PumpReleaseUpdates()
         {
             releaseUpdates.Check(false);
-            Version found = releaseUpdates.TakeNotification();
-            if (found == null) return;
-            try { ShowBalloon(L.T("有新版本"), L.F("最新版本 {0}", found)); }
-            catch (Exception error) { Log("版本通知失败：" + error.Message); }
+            releaseUpdates.StartAutoDownload(settings.autoUpdate);
+            if (releaseUpdates.TryAutoInstall(settings.autoUpdate, IsUiBusyForUpdate())) return;
+            if (!settings.autoUpdate)
+            {
+                Version found = releaseUpdates.TakeNotification();
+                if (found == null) return;
+                try { ShowBalloon(L.T("有新版本"), L.F("最新版本 {0}", found)); }
+                catch (Exception error) { Log("版本通知失败：" + error.Message); }
+            }
         }
         internal void RefreshSettingsAccounts()
         {
@@ -2432,7 +2481,8 @@ namespace QuotaTrayApp
                     AccountsLoading = accountDiscoveryPending, DesktopSlot = multiAccounts == null ? "auto" : multiAccounts.DesktopPreference,
                     CodexMissing = !settings.HasCodex, AccountReadError = multiDiscoveryError,
                     Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel,
-                    NotifySound = settings.notifySound, NotifyVolume = settings.notifyVolume, AutoStart = IsAutoStartEnabled() };
+                    NotifySound = settings.notifySound, NotifyVolume = settings.notifyVolume,
+                    AutoUpdate = settings.autoUpdate, AutoStart = IsAutoStartEnabled() };
             };
             actions.ConnectAccounts = delegate { ShowAccountConnections(); };
             actions.RefreshAll = delegate { if (multiAccounts != null) multiAccounts.RefreshAll(); else RestartMultiAccounts(); };
@@ -2461,6 +2511,7 @@ namespace QuotaTrayApp
             actions.SetLanguage = delegate(string language) { SetLanguage(language); if (quotaSettingsForm != null && !quotaSettingsForm.IsDisposed) quotaSettingsForm.Reload(); };
             actions.SetTheme = delegate(string theme) { settings.theme = UiTheme.Normalize(theme); settings.Save(root); UiTheme.Set(settings.theme); };
             actions.SetAutoStart = delegate(bool enabled) { return SetAutoStart(enabled); };
+            actions.SetAutoUpdate = delegate(bool enabled) { return settings.SetAutoUpdate(root, enabled); };
             actions.ReadUpdate = delegate { return releaseUpdates.State; };
             actions.CheckUpdate = delegate { releaseUpdates.Check(true); };
             actions.ApplyUpdate = releaseUpdates.Install;
@@ -2556,8 +2607,8 @@ namespace QuotaTrayApp
         {
             AccountToastEntry next = accountToasts.Take(toast != null && !toast.IsDisposed);
             if (next == null) return;
-            ShowToast(next.Slot == null ? next.Label + " · " + L.T("额度提醒") : L.T("额度提醒"),
-                next.Body, next.Sound, next.Slot, next.EmailMask, next.Compact);
+            string title = next.PlainTitle ? next.Label : (next.Slot == null ? next.Label + " · " + L.T("额度提醒") : L.T("额度提醒"));
+            ShowToast(title, next.Body, next.Sound, next.Slot, next.EmailMask, next.Compact);
         }
 
         internal void SetMultiMode(bool enabled)
@@ -2696,31 +2747,42 @@ namespace QuotaTrayApp
         {
             return trayMenu != null && trayMenu.PopupVisible;
         }
+        internal static QuotaTipLine[] BuildQuotaTipLines(ConnectionReply reply, string error, DateTime lastSuccess)
+        {
+            var rows = new System.Collections.Generic.List<QuotaTipLine>();
+            if (reply != null)
+            {
+                bool longExhausted = false;
+                foreach (WindowInfo w in new WindowInfo[] { reply.primary, reply.secondary })
+                    if (w != null && QuotaWindow.IsLong(w.windowMins) && QuotaWindow.Remaining(w.used) <= 0)
+                        longExhausted = true;
+                foreach (WindowInfo w in new WindowInfo[] { reply.primary, reply.secondary })
+                {
+                    if (w == null) continue;
+                    bool isLong = QuotaWindow.IsLong(w.windowMins);
+                    rows.Add(new QuotaTipLine
+                    {
+                        Label = isLong ? L.F("{0} 天", QuotaWindow.Days(w.windowMins)) : L.T("5 小时"),
+                        Remaining = QuotaWindow.Remaining(w.used),
+                        Detail = MultiTooltipCountdown(w.resetsAt),
+                        Superseded = !isLong && longExhausted
+                    });
+                }
+            }
+            if (rows.Count == 0 && error != null)
+                rows.Add(new QuotaTipLine { Label = L.T("更新失败"), Remaining = -1,
+                    Detail = L.T("最后成功") + " " + (lastSuccess == DateTime.MinValue ? L.T("暂无") : lastSuccess.ToString("MM-dd HH:mm")) });
+            return rows.ToArray();
+        }
         internal bool ShowQuotaTip(NotifyIcon icon, string header, ConnectionReply reply, string error, DateTime lastSuccess)
         {
             if (QuotaTipBlockedByMenu()) return true;
             try
             {
-                var rows = new System.Collections.Generic.List<QuotaTipLine>();
-                if (reply != null)
-                {
-                    foreach (WindowInfo w in new WindowInfo[] { reply.primary, reply.secondary })
-                    {
-                        if (w == null) continue;
-                        rows.Add(new QuotaTipLine
-                        {
-                            Label = QuotaWindow.IsLong(w.windowMins) ? L.F("{0} 天", QuotaWindow.Days(w.windowMins)) : L.T("5 小时"),
-                            Remaining = QuotaWindow.Remaining(w.used),
-                            Detail = MultiTooltipCountdown(w.resetsAt)
-                        });
-                    }
-                }
-                if (rows.Count == 0 && error != null)
-                    rows.Add(new QuotaTipLine { Label = L.T("更新失败"), Remaining = -1,
-                        Detail = L.T("最后成功") + " " + (lastSuccess == DateTime.MinValue ? L.T("暂无") : lastSuccess.ToString("MM-dd HH:mm")) });
-                if (rows.Count == 0) { HideQuotaTip(); return true; }
+                QuotaTipLine[] rows = BuildQuotaTipLines(reply, error, lastSuccess);
+                if (rows.Length == 0) { HideQuotaTip(); return true; }
                 if (quotaTip == null || quotaTip.IsDisposed) quotaTip = new UiQuotaTip();
-                quotaTip.Present(icon, header, rows.ToArray());
+                quotaTip.Present(icon, header, rows);
                 return true;
             }
             catch
@@ -2928,6 +2990,8 @@ namespace QuotaTrayApp
             accountToasts.Enqueue(null, L.T("额度显示器"), NotifyRules.RecoveryBody(days), RecoverySound, null, true);
         }
 
+        internal const string NoSound = "";
+
         // 自绘弹窗，按设置决定是否在滑入时播放提示音
         private void ShowToast(string title, string body, string soundFile, string slot = null, string emailMask = null, bool compact = false)
         {
@@ -2939,7 +3003,7 @@ namespace QuotaTrayApp
                     toast = null;
                 }
                 toast = new ToastForm(title, body, slot, emailMask, compact);
-                AttachToastSound(toast, root, soundFile, Log, settings.notifySound, settings.notifyVolume);
+                if (soundFile != NoSound) AttachToastSound(toast, root, soundFile, Log, settings.notifySound, settings.notifyVolume);
                 toast.Show();
             }
             catch (Exception ex)
@@ -2959,7 +3023,7 @@ namespace QuotaTrayApp
         internal static void AttachToastSound(ToastForm form, string dir, string soundFile, Action<string> report,
             bool enabled = true, int volume = AppSettings.DefaultNotifyVolume)
         {
-            if (enabled && volume > 0) form.SynchronizeSlideIn = PrepareToastSound(dir, soundFile, volume, report);
+            if (enabled && volume > 0 && soundFile != NoSound) form.SynchronizeSlideIn = PrepareToastSound(dir, soundFile, volume, report);
         }
 
         internal static void PlayNotifySample(string dir, int volume, Action<string> report)

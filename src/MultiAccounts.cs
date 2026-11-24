@@ -30,15 +30,15 @@ namespace QuotaTrayApp
     internal sealed class AccountToastEntry
     {
         internal string Slot, Label, Body, Sound, EmailMask;
-        internal bool Compact;
+        internal bool Compact, PlainTitle;
     }
     internal sealed class AccountToastQueue
     {
         private readonly Queue<AccountToastEntry> entries = new Queue<AccountToastEntry>();
         internal void Enqueue(string label, string body, string sound) { Enqueue(null, label, body, sound); }
-        internal void Enqueue(string slot, string label, string body, string sound, string emailMask = null, bool compact = false)
+        internal void Enqueue(string slot, string label, string body, string sound, string emailMask = null, bool compact = false, bool plainTitle = false)
         {
-            entries.Enqueue(new AccountToastEntry { Slot = slot, Label = label, Body = body, Sound = sound, EmailMask = emailMask, Compact = compact });
+            entries.Enqueue(new AccountToastEntry { Slot = slot, Label = label, Body = body, Sound = sound, EmailMask = emailMask, Compact = compact, PlainTitle = plainTitle });
         }
         internal void Remove(string slot)
         {
@@ -121,6 +121,7 @@ namespace QuotaTrayApp
         private bool groupActive;
         private string groupError;
         internal bool Managed { get; private set; }
+        internal bool HasOpenWindows { get { return overviewForm != null && !overviewForm.IsDisposed; } }
 
         internal MultiAccountController(TrayContext host, string root, string nodeExe, string codexExe, AppSettings settings, ContextMenuStrip menu)
         {
