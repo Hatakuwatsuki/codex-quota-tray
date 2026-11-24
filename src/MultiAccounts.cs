@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 #if !DISPLAY_POLICY_ONLY
 using System.Diagnostics;
@@ -413,6 +413,7 @@ namespace QuotaTrayApp
                     icon.MouseDown += delegate { selected = captured.account.slot; host.HideQuotaTip(); host.PrepareMultiMenu(selected, LabelFor(captured)); };
                     icon.MouseMove += delegate
                     {
+                        captured.hover.Reassert();
                         if (captured.hover.Enabled && !host.ShowQuotaTip(icon, LabelFor(captured), captured.reply, captured.error, captured.lastSuccess))
                             captured.hover.Disable();
                     };
@@ -456,7 +457,8 @@ namespace QuotaTrayApp
             }
             string tooltip = BuildNativeTooltip(s.account.slot, s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan),
                 s.account.emailMask ?? (s.account.identity == null ? null : s.account.identity.emailMask), s.reply, s.error, s.lastSuccess);
-            if (tooltip != s.icon.Text) s.icon.Text = tooltip;
+            // The custom hint keeps the icon text empty on purpose; see TrayIconHover.BlankTip.
+            if (!s.hover.Enabled && tooltip != s.icon.Text) s.icon.Text = tooltip;
             if (s.hover.Enabled && !host.RefreshQuotaTip(s.icon, LabelFor(s), s.reply, s.error, s.lastSuccess))
                 s.hover.Disable();
         }

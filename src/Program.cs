@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.54.0")]
+[assembly: AssemblyVersion("1.9.55.0")]
 
 namespace QuotaTrayApp
 {

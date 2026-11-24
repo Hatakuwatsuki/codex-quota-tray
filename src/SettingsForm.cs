@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -3628,6 +3628,9 @@ namespace QuotaTrayApp
         private uint id;
         private bool useCustom = true;
         private bool version4;
+        private bool blanked;
+        private string savedTip;
+        private DateTime lastAssert;
         internal bool Enabled { get { return version4 && useCustom; } }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -3680,12 +3683,62 @@ namespace QuotaTrayApp
             if (!TryGetIdentity(icon, out window, out id)) return;
             if (Handle != window) AssignHandle(window);
             version4 = ApplyVersion(CustomTooltipVersion);
+            BlankTip();
         }
 
         internal void Disable()
         {
             useCustom = false;
             if (version4 && ApplyVersion(0)) version4 = false;
+            BlankTip();
+        }
+
+        // Version 4 ignores the tooltip text, but Explorer still builds a small hover host
+        // from it, which is what peeks out from under the quota tip. With no text there is
+        // nothing to build, so the host is never created (not just hidden afterwards).
+        private void BlankTip()
+        {
+            if (version4 && !blanked)
+            {
+                savedTip = icon.Text;
+                try { icon.Text = ""; } catch { }
+                blanked = true;
+            }
+            else if (!version4 && blanked)
+            {
+                blanked = false;
+                try { icon.Text = savedTip ?? ""; } catch { }
+            }
+        }
+
+        // Explorer can drop the version-4 registration when it rebuilds the notification area,
+        // and the window handle can change with it. Re-assert the registration right before a
+        // custom tip is shown so the native tooltip (and its empty host popup) stays hidden.
+        // Rate limited because MouseMove fires continuously while the pointer stays on the icon.
+        internal void Reassert()
+        {
+            if (!useCustom || !icon.Visible) return;
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastAssert).TotalMilliseconds < 1000) return;
+            Rebind();
+        }
+
+        // Identity is re-read every time: Explorer rebuilds the notification area on its own
+        // schedule and the window handle or icon id can change underneath us.
+        private void Rebind()
+        {
+            lastAssert = DateTime.UtcNow;
+            IntPtr window;
+            uint currentId;
+            if (!useCustom || !icon.Visible || !TryGetIdentity(icon, out window, out currentId)) { version4 = false; BlankTip(); return; }
+            id = currentId;
+            if (Handle != window)
+            {
+                if (Handle != IntPtr.Zero) ReleaseHandle();
+                AssignHandle(window);
+            }
+            version4 = ApplyVersion(CustomTooltipVersion);
+            BlankTip();
         }
 
         private bool ApplyVersion(uint version)
@@ -3712,7 +3765,78 @@ namespace QuotaTrayApp
                 message.LParam = (IntPtr)eventId;
             }
             base.WndProc(ref message);
-            if (message.Msg == TaskbarCreated) version4 = icon.Visible && useCustom && ApplyVersion(CustomTooltipVersion);
+            if (message.Msg == TaskbarCreated) Rebind();
+        }
+    }
+
+    // Explorer draws its own translucent host popup while the pointer sits on a tray icon.
+    // With NOTIFYICON_VERSION_4 that popup stays hidden; if the registration was lost it can
+    // remain as a small dark square peeking out behind the quota tip. Hide only that empty
+    // shell: same window class, small, and overlapping the tip we just showed.
+    internal static class TrayPopupSuppressor
+    {
+        private const string HoverShellClass = "Xaml_WindowedPopupClass";
+        private static DateTime lastSweep;
+
+        [StructLayout(LayoutKind.Sequential)] private struct RectNative { public int Left, Top, Right, Bottom; }
+        private delegate bool EnumProc(IntPtr window, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int length);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RectNative rect);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+
+        internal static bool ShouldHide(string className, Rectangle shell, Rectangle tip)
+        {
+            // The host popup can sit just outside the tip edge, so allow a margin.
+            Rectangle reach = tip;
+            reach.Inflate(48, 48);
+            return className == HoverShellClass && shell.Width > 0 && shell.Height > 0 &&
+                shell.Width <= 160 && shell.Height <= 120 && reach.IntersectsWith(shell);
+        }
+
+        internal static bool Enabled = true;
+        // Last protection pass, surfaced by the tray hover sample so the result is visible.
+        internal static int LastFound, LastHidden;
+
+        internal static int Hide(Rectangle tip)
+        {
+            if (!Enabled) return 0;
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastSweep).TotalMilliseconds < 400) return 0;
+            lastSweep = now;
+            int found = Sweep(tip, true);
+            LastFound = found;
+            LastHidden = found;
+            return found;
+        }
+
+        // Read-only counterpart used by the tray hover sample so the result is checkable.
+        internal static int Count(Rectangle tip) { return Sweep(tip, false); }
+
+        private static int Sweep(Rectangle tip, bool hide)
+        {
+            int found = 0;
+            EnumWindows(delegate(IntPtr window, IntPtr parameter)
+            {
+                if (!IsWindowVisible(window)) return true;
+                RectNative rect;
+                if (!GetWindowRect(window, out rect)) return true;
+                Rectangle shell = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+                System.Text.StringBuilder name = new System.Text.StringBuilder(64);
+                GetClassName(window, name, name.Capacity);
+                if (!ShouldHide(name.ToString(), shell, tip)) return true;
+                found++;
+                if (hide)
+                {
+                    // Hiding alone can be undone by Explorer; park it off-screen as well.
+                    ShowWindow(window, 0);
+                    SetWindowPos(window, IntPtr.Zero, -32000, -32000, 0, 0, 0x15);
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
         }
     }
 
@@ -3812,6 +3936,9 @@ namespace QuotaTrayApp
                 if (!Visible) backdrop.CaptureInitial(BackdropBounds());
                 if (!PresentSurface()) throw new System.ComponentModel.Win32Exception();
                 if (!Visible) { Show(); backdrop.Start(this); }
+                // The native hover shell can survive a lost version-4 registration; it would
+                // otherwise peek out from under this window as a stray dark square.
+                TrayPopupSuppressor.Hide(Bounds);
                 shownAt = DateTime.UtcNow;
                 lastRenderAt = shownAt;
                 life.Start();
@@ -3874,6 +4001,9 @@ namespace QuotaTrayApp
         private void Tick()
         {
             if (!Visible) { life.Stop(); return; }
+            // Keep guarding while the tip is up: Explorer may create its hover host a beat
+            // after the tip appears, so one sweep at Present time is not enough.
+            TrayPopupSuppressor.Hide(Bounds);
             if ((DateTime.UtcNow - shownAt).TotalSeconds > 8) { Dismiss(); return; }
             if (anchorIcon == null) return; // preview mode keeps the tip until its own timer closes it
             POINT cursor;
