@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.55.0")]
+[assembly: AssemblyVersion("1.9.58.0")]
 
 namespace QuotaTrayApp
 {
@@ -75,7 +75,7 @@ namespace QuotaTrayApp
         [DllImport("user32.dll")] private static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
         [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
         internal static bool DpiAware;
-        private static void EnableDpiAwareness()
+        internal static void EnableDpiAwareness()
         {
             if (DpiAware) return;
             try { if (SetProcessDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero) { DpiAware = true; return; } }
@@ -106,7 +106,7 @@ namespace QuotaTrayApp
                 UiTheme.RefreshSystem();
                 L.AutoDetect();
                 var popup = new UiPopup(new[] { L.T("刷新"), L.T("设置"), L.T("退出") }, 0, true,
-                    new Font("Microsoft YaHei UI", 10.5f), delegate { }, 2, L.F("账号 {0}  |  {1}", 1, "Plus"));
+                    UiTheme.UiFont(10.5f), delegate { }, 2, L.F("账号 {0}  |  {1}", 1, "Plus"));
                 popup.Open(null, delegate { Point at = Cursor.Position; return new Rectangle(at.X - 24, at.Y - 24, 48, 48); }, 196, true);
                 var preview = new System.Windows.Forms.Timer();
                 preview.Interval = 6000;
@@ -716,17 +716,23 @@ namespace QuotaTrayApp
             En["{0}额度只剩 {1}%｜{2}"] = "{0} quota: only {1}% left · {2}";
             En["{0}额度已耗尽"] = "{0} quota used up";
             En["{0}额度已恢复"] = "{0} quota restored";
+            En["今日推荐用量已到"] = "Daily pace reached";
+            En["已达今日推荐用量"] = "Daily pace reached";
 
             Ja["{0}额度还剩 {1}%｜{2}"] = "{0}の残量: {1}%・{2}";
             Ja["{0}额度只剩 {1}%｜{2}"] = "{0}の残量: 残りわずか{1}%・{2}";
             Ja["{0}额度已耗尽"] = "{0}の残量を使い切りました";
             Ja["{0}额度已恢复"] = "{0}の残量が回復しました";
+            Ja["今日推荐用量已到"] = "本日の推奨使用量に到達";
+            Ja["已达今日推荐用量"] = "本日の推奨使用量に到達";
 
             // ---------- 详情窗 ----------
             En["Codex 额度"] = "Codex quota";
             En["套餐：{0}"] = "Plan: {0}";
             En["5 小时额度"] = "5-hour quota";
             En["{0} 天额度"] = "{0}-day quota";
+            En["剩余"] = "Remaining";
+            En["暂无"] = "No data";
             En["剩余 {0}%"] = "{0}% left";
             En["已耗尽"] = "used up";
             En["恢复：{0}"] = "Resets: {0}";
@@ -746,6 +752,8 @@ namespace QuotaTrayApp
             Ja["套餐：{0}"] = "プラン: {0}";
             Ja["5 小时额度"] = "5時間の残量";
             Ja["{0} 天额度"] = "{0}日の残量";
+            Ja["剩余"] = "残量";
+            Ja["暂无"] = "データなし";
             Ja["剩余 {0}%"] = "残り{0}%";
             Ja["已耗尽"] = "使い切り";
             Ja["恢复：{0}"] = "リセット: {0}";
@@ -938,6 +946,7 @@ namespace QuotaTrayApp
         public bool notifySound = true;
         internal const int DefaultNotifyVolume = 100;
         public int notifyVolume = DefaultNotifyVolume;
+        public bool dailyPaceDefault = true;
         public bool autoUpdate = true;
         public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
@@ -956,7 +965,36 @@ namespace QuotaTrayApp
             return codexPath;
         }
         private readonly System.Collections.Generic.Dictionary<string, int> accountLevels = new System.Collections.Generic.Dictionary<string, int>();
+        private readonly System.Collections.Generic.Dictionary<string, bool> accountDailyPace = new System.Collections.Generic.Dictionary<string, bool>();
         internal bool HasAccountLevel(string slot) { return accountLevels.ContainsKey(slot); }
+        internal bool HasAccountDailyPace(string slot) { return slot != null && accountDailyPace.ContainsKey(slot); }
+        internal bool DailyPaceFor(string slot)
+        {
+            bool value;
+            return slot != null && accountDailyPace.TryGetValue(slot, out value) ? value : dailyPaceDefault;
+        }
+        internal bool SetAccountDailyPace(string root, string slot, bool enabled)
+        {
+            if (!DisplayPolicy.ValidSlot(slot)) return false;
+            bool hadPrevious = accountDailyPace.ContainsKey(slot);
+            bool previous = hadPrevious && accountDailyPace[slot];
+            accountDailyPace[slot] = enabled;
+            if (Save(root)) return true;
+            if (hadPrevious) accountDailyPace[slot] = previous;
+            else accountDailyPace.Remove(slot);
+            return false;
+        }
+        internal bool ApplyGlobalDailyPace(string root, bool enabled)
+        {
+            bool previousDefault = dailyPaceDefault;
+            var previousOverrides = new System.Collections.Generic.Dictionary<string, bool>(accountDailyPace);
+            dailyPaceDefault = enabled;
+            accountDailyPace.Clear();
+            if (Save(root)) return true;
+            dailyPaceDefault = previousDefault;
+            foreach (var previous in previousOverrides) accountDailyPace.Add(previous.Key, previous.Value);
+            return false;
+        }
         internal int LevelFor(string slot)
         {
             int value;
@@ -1037,12 +1075,15 @@ namespace QuotaTrayApp
                     else if (k == "bindingsetupdone") s.bindingSetupDone = v == "true";
                     else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
                     else if (k == "notifysound" && (v == "true" || v == "false")) s.notifySound = v == "true";
+                    else if (k == "dailypace" && (v == "true" || v == "false")) s.dailyPaceDefault = v == "true";
                     else if (k == "autoupdate" && (v == "true" || v == "false")) s.autoUpdate = v == "true";
                     else if (k == "notifyvolume")
                     {
                         int volume;
                         if (Int32.TryParse(v, out volume) && volume >= 0 && volume <= 100) s.notifyVolume = volume;
                     }
+                    else if (k.StartsWith("dailypace.") && DisplayPolicy.ValidSlot(k.Substring(10)) && (v == "true" || v == "false"))
+                        s.accountDailyPace[k.Substring(10)] = v == "true";
                     else if (k.StartsWith("notify.") && DisplayPolicy.ValidSlot(k.Substring(7))) s.accountLevels[k.Substring(7)] = ParseLevel(v);
                     else if (k == "language")
                     {
@@ -1086,6 +1127,7 @@ namespace QuotaTrayApp
                             + "notifyLevel=" + Key() + Environment.NewLine
                             + "notifySound=" + (notifySound ? "true" : "false") + Environment.NewLine
                             + "notifyVolume=" + notifyVolume + Environment.NewLine
+                            + "dailyPace=" + (dailyPaceDefault ? "true" : "false") + Environment.NewLine
                             + "autoUpdate=" + (autoUpdate ? "true" : "false") + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
                             + "language=" + language + Environment.NewLine
@@ -1096,6 +1138,8 @@ namespace QuotaTrayApp
                 text += "codexLookupAttempted=" + codexLookupAttempted.ToString().ToLowerInvariant() + Environment.NewLine;
                 foreach (string slot in new string[] { "a", "b", "c", "d", "e" })
                     if (accountLevels.ContainsKey(slot)) text += "notify." + slot + "=" + LevelKey(accountLevels[slot]) + Environment.NewLine;
+                foreach (string slot in new string[] { "a", "b", "c", "d", "e" })
+                    if (accountDailyPace.ContainsKey(slot)) text += "dailyPace." + slot + "=" + (accountDailyPace[slot] ? "true" : "false") + Environment.NewLine;
                 string target = Path.Combine(root, "settings.txt");
                 temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(temp, text, new UTF8Encoding(false));
@@ -1143,6 +1187,11 @@ namespace QuotaTrayApp
         internal static string RecoveryBody(int days)
         {
             return L.F("{0}额度已恢复", days == 0 ? L.T("5 小时") : L.F("{0} 天", days));
+        }
+
+        internal static string DailyPaceBody()
+        {
+            return L.T("已达今日推荐用量");
         }
     }
 
@@ -1271,9 +1320,9 @@ namespace QuotaTrayApp
             accountColor = UiTheme.AccountColor(slot);
             emailMask = email != null && email.Length <= 128 &&
                 System.Text.RegularExpressions.Regex.IsMatch(email, @"^[A-Za-z0-9]{1,2}\*{3}@[A-Za-z0-9.\-]{1,123}$") ? email : "";
-            smallFont = new Font("Microsoft YaHei UI", 8.5f);
-            titleFont = new Font("Microsoft YaHei UI", 9.25f);
-            bodyFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            smallFont = UiTheme.UiFont(8.5f);
+            titleFont = UiTheme.UiFont(9.25f);
+            bodyFont = UiTheme.UiFont(12f, FontStyle.Bold);
 
             Text = titleText;
             AccessibleName = titleText + " " + emailMask + " " + body;
@@ -1493,25 +1542,31 @@ namespace QuotaTrayApp
 
         private static void DrawToastText(Graphics graphics, string text, Font font, Rectangle bounds, Color color, bool fit = false)
         {
-            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            using (var format = new StringFormat(StringFormat.GenericTypographic))
-            using (var brush = new SolidBrush(color))
+            PixelOffsetMode previousOffset = graphics.PixelOffsetMode;
+            graphics.PixelOffsetMode = PixelOffsetMode.Default;
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            try
             {
-                format.LineAlignment = StringAlignment.Center;
-                format.Trimming = StringTrimming.EllipsisCharacter;
-                format.FormatFlags |= StringFormatFlags.NoWrap;
-                if (fit)
+                using (var format = new StringFormat(StringFormat.GenericTypographic))
+                using (var brush = new SolidBrush(color))
                 {
-                    float width = graphics.MeasureString(text, font, PointF.Empty, format).Width;
-                    if (width > bounds.Width)
+                    format.LineAlignment = StringAlignment.Center;
+                    format.Trimming = StringTrimming.EllipsisCharacter;
+                    format.FormatFlags |= StringFormatFlags.NoWrap;
+                    if (fit && !String.IsNullOrEmpty(text))
                     {
-                        using (var fitted = new Font(font.FontFamily, font.Size * (bounds.Width - 1) / width, font.Style))
-                            graphics.DrawString(text, fitted, brush, bounds, format);
-                        return;
+                        float width = graphics.MeasureString(text, font, PointF.Empty, format).Width;
+                        if (width > bounds.Width)
+                        {
+                            using (var fitted = new Font(font.FontFamily, font.Size * (bounds.Width - 1) / width, font.Style))
+                                graphics.DrawString(text, fitted, brush, bounds, format);
+                            return;
+                        }
                     }
+                    graphics.DrawString(text, font, brush, bounds, format);
                 }
-                graphics.DrawString(text, font, brush, bounds, format);
             }
+            finally { graphics.PixelOffsetMode = previousOffset; }
         }
 
         protected override void Dispose(bool disposing)
@@ -1755,7 +1810,7 @@ namespace QuotaTrayApp
             MaximizeBox = false;
             MinimizeBox = false;
             ShowIcon = false;
-            Font = SystemFonts.MessageBoxFont;
+            Font = UiTheme.UiFont(SystemFonts.MessageBoxFont.SizeInPoints);
 
             int inset = S(24), actionHeight = S(38), buttonGap = S(8), groupGap = S(40);
             int cap = ScaledCaptionHeight;
@@ -2072,7 +2127,7 @@ namespace QuotaTrayApp
 
         internal static ContextMenuStrip CreateNativeContextMenu()
         {
-            ContextMenuStrip menu = new UiTrayMenu { ShowImageMargin = false, ShowItemToolTips = true, Font = new Font("Microsoft YaHei UI", 9.5f) };
+            ContextMenuStrip menu = new UiTrayMenu { ShowImageMargin = false, ShowItemToolTips = true, Font = UiTheme.UiFont(9.5f) };
             return menu;
         }
 
@@ -2149,6 +2204,7 @@ namespace QuotaTrayApp
         private AppSettings settings = new AppSettings();
         private NotifyWindow notifyTiered;
         private NotifyWindow notifyFixed;
+        private DailyPaceTracker dailyPace;
         private Font menuFontBold;
 
         // 菜单项留引用：切语言时要就地改标题，不能重建整个菜单
@@ -2482,6 +2538,7 @@ namespace QuotaTrayApp
                     CodexMissing = !settings.HasCodex, AccountReadError = multiDiscoveryError,
                     Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel,
                     NotifySound = settings.notifySound, NotifyVolume = settings.notifyVolume,
+                    DefaultDailyPace = settings.dailyPaceDefault,
                     AutoUpdate = settings.autoUpdate, AutoStart = IsAutoStartEnabled() };
             };
             actions.ConnectAccounts = delegate { ShowAccountConnections(); };
@@ -2495,6 +2552,14 @@ namespace QuotaTrayApp
                 if (multiAccounts != null) multiAccounts.ResetReminder(slot);
             };
             actions.ApplyGlobalLevel = ApplyGlobalNotifyLevel;
+            actions.ApplyGlobalDailyPace = delegate(bool enabled)
+            {
+                return settings.ApplyGlobalDailyPace(root, enabled);
+            };
+            actions.SetAccountDailyPace = delegate(string slot, bool enabled)
+            {
+                return settings.SetAccountDailyPace(root, slot, enabled);
+            };
             actions.SetNotifySound = delegate(bool enabled)
             {
                 if (!settings.SetNotifySound(root, enabled)) return false;
@@ -2852,6 +2917,12 @@ namespace QuotaTrayApp
             settings.language = v;
             settings.Save(root);
             ApplyLanguageSetting();
+            if (trayMenu != null)
+            {
+                Font oldMenuFont = trayMenu.Font;
+                trayMenu.Font = UiTheme.UiFont(9.5f);
+                if (oldMenuFont != null) oldMenuFont.Dispose();
+            }
             ApplyLanguage();
             Log("语言 -> " + v);
         }
@@ -2934,7 +3005,16 @@ namespace QuotaTrayApp
         //   Pro  —— 只有 7 天额度，按档位
         private void EvaluateNotify()
         {
-            if (!hasData || settings.notifyLevel < 0) return;
+            if (!hasData) return;
+            if (secondaryUsed >= 0 && secondaryDays >= 1)
+            {
+                if (dailyPace == null) dailyPace = DailyPaceTracker.Load(root);
+                DailyPaceDecision pace = dailyPace.Evaluate(null, settings.dailyPaceDefault,
+                    secondaryUsed, secondaryReset, DateTimeOffset.UtcNow);
+                if (pace.Triggered)
+                    accountToasts.Enqueue(null, L.T("额度显示器"), NotifyRules.DailyPaceBody(), NoSound, null, true);
+            }
+            if (settings.notifyLevel < 0) return;
             bool singleWindow = primaryUsed < 0;
             EnsureNotifiers(singleWindow);
 
@@ -3933,11 +4013,18 @@ namespace QuotaTrayApp
             UiTheme.Set(theme == "light" || theme == "dark" ? theme : prefs.theme);
 
             string body, sound;
+            bool dailyPaceDemo = kind == "daily-pace";
             bool restored = kind == "5h-restored" || kind == "7d-restored";
+            bool compactToast = restored || dailyPaceDemo;
             bool exhausted = kind == "5h-empty" || kind == "7d-empty";
             bool weekly = kind == "7d-empty" || kind == "7d-25" || kind == "7d-restored";
             string window = weekly ? L.F("{0} 天", 7) : L.T("5 小时");
-            if (restored)
+            if (dailyPaceDemo)
+            {
+                body = NotifyRules.DailyPaceBody();
+                sound = NoSound;
+            }
+            else if (restored)
             {
                 body = NotifyRules.RecoveryBody(weekly ? 7 : 0);
                 sound = RecoverySound;
@@ -3955,7 +4042,7 @@ namespace QuotaTrayApp
                 sound = "notify.wav";
             }
 
-            using (ToastForm form = new ToastForm(L.T("额度提醒"), body, slot, "22***@example.com", restored))
+            using (ToastForm form = new ToastForm(L.T("额度提醒"), body, slot, "22***@example.com", compactToast))
             {
                 AttachToastSound(form, dir, sound, Console.Error.WriteLine, prefs.notifySound, prefs.notifyVolume);
                 Application.Run(form);

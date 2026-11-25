@@ -261,7 +261,7 @@ namespace QuotaTrayApp
                     failedBinding[index] = account.Failed;
                 }
             Text = AccountText.T("账号绑定");
-            Font = new Font("Microsoft YaHei UI", 10.5f);
+            Font = UiTheme.UiFont(10.5f);
             MaximizeBox = false;
             MinimizeBox = false;
             ShowIcon = true;

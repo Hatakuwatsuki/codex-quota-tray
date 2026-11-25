@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace QuotaTrayApp
 {
-    internal sealed class SettingsAccount { internal string Slot, Label, Plan, EmailMask, Quota; internal int DisplayNumber; internal WindowInfo Primary, Secondary; internal bool Failed; internal bool Visible; internal int NotifyLevel; }
+    internal sealed class SettingsAccount { internal string Slot, Label, Plan, EmailMask, Quota; internal int DisplayNumber; internal WindowInfo Primary, Secondary; internal bool Failed; internal bool Visible; internal int NotifyLevel; internal bool DailyPace = true; }
     internal sealed class SettingsSnapshot
     {
         internal List<SettingsAccount> Accounts;
@@ -18,6 +18,7 @@ namespace QuotaTrayApp
         internal int DefaultNotifyLevel;
         internal bool NotifySound = true;
         internal int NotifyVolume = AppSettings.DefaultNotifyVolume;
+        internal bool DefaultDailyPace = true;
         internal bool AutoUpdate = true;
         internal bool AutoStart, AccountsLoading, CodexMissing;
     }
@@ -28,6 +29,8 @@ namespace QuotaTrayApp
         internal Func<string[], string, bool> SaveDisplay;
         internal Action<string, int> SetAccountLevel;
         internal Func<int, bool> ApplyGlobalLevel;
+        internal Func<bool, bool> ApplyGlobalDailyPace;
+        internal Func<string, bool, bool> SetAccountDailyPace;
         internal Func<bool, bool> SetNotifySound;
         internal Func<int, bool> SetNotifyVolume;
         internal Action<int> TestNotifyVolume;
@@ -41,7 +44,14 @@ namespace QuotaTrayApp
     internal sealed class QuotaSettingsForm : UiWindow
     {
         private readonly SettingsActions actions;
-        private readonly FlowLayoutPanel sidebar, content;
+        private readonly UiFlowPanel sidebar, content;
+        private readonly UiScrollBar scrollBar;
+        private readonly WheelFilter wheelFilter;
+        private readonly System.Windows.Forms.Timer scrollTimer = new System.Windows.Forms.Timer { Interval = 15 };
+        private readonly Dictionary<Control, int> baseChildTops = new Dictionary<Control, int>();
+        private double scrollTarget, scrollCurrent, overscroll;
+        private int maxScroll, totalContentHeight;
+        private bool applyingScroll;
         private readonly RadioButton[] navigation = new RadioButton[4];
         private bool updatingNavigation, resizingCards;
         private readonly System.Windows.Forms.Timer themeTimer = new System.Windows.Forms.Timer();
@@ -135,6 +145,8 @@ namespace QuotaTrayApp
             { "应用", new string[] { "適用", "Apply" } },
             { "应用后统一已绑定账号的档位，新绑定的账号也默认使用此档位。", new string[] { "適用すると連携済みのアカウントが同じレベルになり、新規アカウントにも適用されます。", "Apply sets this level for all bound accounts and makes it the default for newly bound accounts." } },
             { "默认提醒档位", new string[] { "既定の通知レベル", "Default alert level" } },
+            { "推荐用量提醒", new string[] { "推奨使用量アラート", "Recommended usage alert" } },
+            { "默认对所有账号开启或关闭，也可在下方按账号单独调整。", new string[] { "すべてのアカウントの既定値にします。下のアカウント別に個別の変更もできます。", "Sets the default for all accounts; you can still toggle each account below." } },
             { "播放提醒声音", new string[] { "通知音を鳴らす", "Play alert sounds" } },
             { "提醒音量", new string[] { "通知音量", "Alert volume" } },
             { "试听", new string[] { "試聴", "Test" } },
@@ -178,7 +190,7 @@ namespace QuotaTrayApp
             Size area = Screen.FromPoint(Cursor.Position).WorkingArea.Size;
             Size = new Size(Math.Min(S(800), area.Width), Math.Min(S(520), area.Height));
             MinimumSize = new Size(Math.Min(S(680), area.Width), Math.Min(S(430), area.Height));
-            Font = new Font("Microsoft YaHei UI", 10.5f);
+            Font = UiTheme.UiFont(10.5f);
             StartPosition = FormStartPosition.CenterScreen;
             sidebar = new UiFlowPanel();
             sidebar.Name = "sidebar";
@@ -205,15 +217,41 @@ namespace QuotaTrayApp
             content.Dock = DockStyle.Fill;
             content.FlowDirection = FlowDirection.TopDown;
             content.WrapContents = false;
-            content.AutoScroll = true;
+            content.AutoScroll = false;
             content.Padding = new Padding(S(18), S(15), S(18), S(14));
+            content.GetCustomScroll = delegate { return new Point(0, -(int)Math.Round(scrollCurrent)); };
+            content.SetCustomScroll = delegate(Point pt)
+            {
+                int target = pt.Y < 0 ? -pt.Y : pt.Y;
+                scrollTarget = scrollCurrent = Math.Max(0, Math.Min(maxScroll, target));
+                overscroll = 0;
+                scrollTimer.Stop();
+                ApplyCustomScroll();
+            };
+            content.AfterCustomLayout = delegate { CaptureBasePositionsAndApplyScroll(); };
+            scrollBar = new UiScrollBar();
+            scrollBar.Name = "content-scrollbar";
+            scrollBar.Visible = false;
+            scrollBar.Scrolled += delegate(int value)
+            {
+                scrollTarget = scrollCurrent = Math.Max(0, Math.Min(maxScroll, value));
+                overscroll = 0;
+                scrollTimer.Stop();
+                ApplyCustomScroll();
+            };
+            scrollBar.WheelDelta += delegate(int delta) { HandleWheelDelta(delta); };
+            scrollTimer.Tick += delegate { StepScrollAnimation(); };
+            wheelFilter = new WheelFilter(this);
+            Application.AddMessageFilter(wheelFilter);
             Controls.Add(content);
             Controls.Add(sidebar);
+            Controls.Add(scrollBar);
+            scrollBar.BringToFront();
             versionLabel = new UiLabel();
             versionLabel.Name = "version-label";
             versionLabel.AutoSize = true;
             versionLabel.Text = VersionCaption();
-            Font versionFont = new Font(Font.FontFamily, 8.5f);
+            Font versionFont = UiTheme.UiFont(8.5f);
             versionLabel.Font = versionFont;
             versionLabel.Disposed += delegate { versionFont.Dispose(); };
             versionLabel.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
@@ -307,14 +345,33 @@ namespace QuotaTrayApp
 
         private void Reload(bool preserveScroll, SettingsSnapshot current = null)
         {
-            Point oldScroll = content.AutoScrollPosition;
+            double oldScrollY = scrollCurrent;
             snapshot = current ?? ReadSnapshot();
+            FontFamily targetFamily = UiTheme.FontFamilyFor(snapshot.Language);
+            if (!Equals(Font.FontFamily, targetFamily))
+            {
+                Font oldFont = Font;
+                Font = new Font(targetFamily, 10.5f);
+                foreach (RadioButton nav in navigation) nav.Font = Font;
+                if (versionLabel != null)
+                {
+                    Font oldVerFont = versionLabel.Font;
+                    Font newVerFont = new Font(targetFamily, 8.5f);
+                    versionLabel.Font = newVerFont;
+                    if (versionRange != null) versionRange.Font = newVerFont;
+                    versionLabel.Disposed += delegate { newVerFont.Dispose(); };
+                    if (oldVerFont != null && !ReferenceEquals(oldVerFont, oldFont)) oldVerFont.Dispose();
+                }
+                if (oldFont != null) oldFont.Dispose();
+                PositionVersionFooter();
+            }
             accountQuotaRows.Clear();
             Text = T("额度显示器设置");
             TitlePrimary = T("额度显示器"); TitleSecondary = T("设置"); TitleBar.Invalidate();
             if (versionLabel != null) versionLabel.Text = VersionCaption();
             content.SuspendLayout();
             while (content.Controls.Count > 0) content.Controls[0].Dispose();
+            baseChildTops.Clear();
             checkUpdateButton = null; updateMessage = null;
             displayToggles.Clear(); desktopSlots.Clear(); desktop = null; error = null;
             updatingNavigation = true;
@@ -340,7 +397,10 @@ namespace QuotaTrayApp
             content.ResumeLayout();
             ResizeCards();
             content.PerformLayout();
-            content.AutoScrollPosition = preserveScroll ? new Point(-oldScroll.X, -oldScroll.Y) : Point.Empty;
+            scrollTarget = scrollCurrent = preserveScroll ? Math.Max(0, Math.Min(maxScroll, oldScrollY)) : 0;
+            overscroll = 0;
+            scrollTimer.Stop();
+            ApplyCustomScroll();
         }
 
         private GroupBox Card(string slot = null)
@@ -420,6 +480,150 @@ namespace QuotaTrayApp
             {
                 content.ResumeLayout(true);
                 resizingCards = false;
+            }
+            CaptureBasePositionsAndApplyScroll();
+        }
+        private void CaptureBasePositionsAndApplyScroll()
+        {
+            if (content == null || scrollBar == null || applyingScroll || resizingCards) return;
+            baseChildTops.Clear();
+            int bottom = content.Padding.Top;
+            foreach (Control child in content.Controls)
+            {
+                baseChildTops[child] = child.Top;
+                if (child.Visible) bottom = Math.Max(bottom, child.Top + child.Height + child.Margin.Bottom);
+            }
+            int viewHeight = Math.Max(1, content.ClientSize.Height);
+            totalContentHeight = Math.Max(viewHeight, bottom + content.Padding.Bottom);
+            maxScroll = Math.Max(0, totalContentHeight - viewHeight);
+            scrollTarget = Math.Max(0, Math.Min(maxScroll, scrollTarget));
+            scrollCurrent = Math.Max(0, Math.Min(maxScroll, scrollCurrent));
+            if (maxScroll == 0) overscroll = Math.Max(-S(36), Math.Min(S(36), overscroll));
+            int barWidth = S(10);
+            scrollBar.SetBounds(Math.Max(0, ClientSize.Width - barWidth - S(3)),
+                ScaledCaptionHeight + S(4), barWidth, Math.Max(1, ClientSize.Height - ScaledCaptionHeight - S(8)));
+            scrollBar.BringToFront();
+            ApplyCustomScroll();
+        }
+        private void ApplyCustomScroll()
+        {
+            if (content == null || applyingScroll) return;
+            applyingScroll = true;
+            content.SuspendLayout();
+            try
+            {
+                int offset = (int)Math.Round(scrollCurrent + overscroll);
+                content.SuppressLayout = true;
+                foreach (KeyValuePair<Control, int> entry in baseChildTops)
+                {
+                    if (entry.Key != null && !entry.Key.IsDisposed)
+                        entry.Key.Top = entry.Value - offset;
+                }
+                int viewHeight = Math.Max(1, content.ClientSize.Height);
+                bool canScroll = totalContentHeight > viewHeight + 1;
+                if (scrollBar != null)
+                {
+                    scrollBar.Visible = canScroll;
+                    if (canScroll) scrollBar.UpdateMetrics(viewHeight, totalContentHeight, scrollCurrent, overscroll, maxScroll);
+                }
+                if (UiTheme.IsGlass(content)) content.Invalidate();
+            }
+            finally
+            {
+                content.SuppressLayout = false;
+                content.ResumeLayout(false);
+                applyingScroll = false;
+            }
+        }
+        private void StepScrollAnimation()
+        {
+            double diff = scrollTarget - scrollCurrent;
+            if (Math.Abs(diff) < 0.35) scrollCurrent = scrollTarget;
+            else scrollCurrent += diff * 0.32;
+
+            if (Math.Abs(overscroll) < 0.35) overscroll = 0;
+            else overscroll *= 0.80;
+
+            ApplyCustomScroll();
+            if (Math.Abs(scrollTarget - scrollCurrent) < 0.35 && Math.Abs(overscroll) < 0.35)
+            {
+                scrollCurrent = scrollTarget;
+                overscroll = 0;
+                scrollTimer.Stop();
+                ApplyCustomScroll();
+            }
+        }
+        internal void HandleWheelDelta(int delta)
+        {
+            if (delta == 0) return;
+            double step = -(delta / 120.0) * S(54);
+            double desired = scrollTarget + step;
+            double maxBounce = S(40);
+            if (desired < 0)
+            {
+                double excess = desired; // negative
+                scrollTarget = 0;
+                double resistance = 1.0 + Math.Abs(overscroll) / S(16);
+                overscroll = Math.Max(-maxBounce, overscroll + excess * 0.45 / resistance);
+            }
+            else if (desired > maxScroll)
+            {
+                double excess = desired - maxScroll; // positive
+                scrollTarget = maxScroll;
+                double resistance = 1.0 + Math.Abs(overscroll) / S(16);
+                overscroll = Math.Min(maxBounce, overscroll + excess * 0.45 / resistance);
+            }
+            else
+            {
+                scrollTarget = desired;
+            }
+            if (IsHandleCreated && !scrollTimer.Enabled) scrollTimer.Start();
+            ApplyCustomScroll();
+        }
+        internal void SimulateWheelForTest(int delta) { HandleWheelDelta(delta); }
+        internal void StepScrollForTest(int steps = 1) { for (int i = 0; i < steps; i++) StepScrollAnimation(); }
+        internal int ScrollMax { get { return maxScroll; } }
+        internal double OverscrollForTest { get { return overscroll; } }
+        internal UiScrollBar ScrollBarForTest { get { return scrollBar; } }
+        private bool IsInsideViewport(Control hit)
+        {
+            for (Control c = hit; c != null; c = c.Parent)
+            {
+                if (ReferenceEquals(c, content) || ReferenceEquals(c, scrollBar)) return true;
+                if (c is Form && !ReferenceEquals(c, this)) return false;
+            }
+            return false;
+        }
+        private bool CanHandleWheel()
+        {
+            if (!Visible || !ContainsFocus && Form.ActiveForm != this) return false;
+            return !HasOpenComboPopup(this);
+        }
+        private static bool HasOpenComboPopup(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                UiComboBox combo = c as UiComboBox;
+                if (combo != null && combo.PopupOpen) return true;
+                if (c.Controls.Count > 0 && HasOpenComboPopup(c)) return true;
+            }
+            return false;
+        }
+        private sealed class WheelFilter : IMessageFilter
+        {
+            private readonly QuotaSettingsForm owner;
+            [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point pt);
+            internal WheelFilter(QuotaSettingsForm owner) { this.owner = owner; }
+            public bool PreFilterMessage(ref Message m)
+            {
+                if (m.Msg != 0x020A || owner.IsDisposed || !owner.Visible || !owner.CanHandleWheel()) return false;
+                long lp = m.LParam.ToInt64();
+                Point pt = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
+                Control hit = Control.FromChildHandle(WindowFromPoint(pt));
+                if (!owner.IsInsideViewport(hit)) return false;
+                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                owner.HandleWheelDelta(delta);
+                return true;
             }
         }
         private Label TextLine(string text, bool bold)
@@ -615,11 +819,16 @@ namespace QuotaTrayApp
         {
             int width = S(88);
             int pad = S(16);
-            foreach (string label in Levels.Concat(Appearances))
+            using (Font zhFont = UiTheme.UiFont(Font.SizeInPoints, Font.Style, "zh"))
+            using (Font sansFont = UiTheme.UiFont(Font.SizeInPoints, Font.Style, "en"))
             {
-                width = Math.Max(width, TextRenderer.MeasureText(label, Font).Width + pad);
-                foreach (string translation in Translations[label])
-                    width = Math.Max(width, TextRenderer.MeasureText(translation, Font).Width + pad);
+                foreach (string label in Levels.Concat(Appearances))
+                {
+                    width = Math.Max(width, TextRenderer.MeasureText(label, zhFont).Width + pad);
+                    width = Math.Max(width, TextRenderer.MeasureText(label, sansFont).Width + pad);
+                    foreach (string translation in Translations[label])
+                        width = Math.Max(width, TextRenderer.MeasureText(translation, sansFont).Width + pad);
+                }
             }
             return width;
         }
@@ -718,6 +927,55 @@ namespace QuotaTrayApp
             inner.Controls.Add(sound);
             inner.Controls.Add(volumeRow);
             inner.Controls.Add(soundError);
+
+            var accountPaceSwitches = new Dictionary<string, UiCheckBox>(StringComparer.Ordinal);
+            bool updatingAccountPace = false;
+            var defaultDailyPace = new UiCheckBox
+            {
+                Name = "default-daily-pace",
+                Text = T("推荐用量提醒"),
+                AutoSize = true,
+                Checked = snapshot.DefaultDailyPace,
+                Enabled = actions.ApplyGlobalDailyPace != null,
+                Margin = new Padding(0, LayoutGap, 0, 0)
+            };
+            Label dailyPaceHelp = HelpText("默认对所有账号开启或关闭，也可在下方按账号单独调整。", "global-daily-pace-help");
+            Label dailyPaceError = HelpText("保存失败，请重试。", "daily-pace-error");
+            dailyPaceError.Visible = false;
+            bool restoringDefaultDailyPace = false;
+            defaultDailyPace.CheckedChanged += delegate
+            {
+                if (restoringDefaultDailyPace) return;
+                bool requested = defaultDailyPace.Checked;
+                bool saved = actions.ApplyGlobalDailyPace != null && actions.ApplyGlobalDailyPace(requested);
+                if (saved)
+                {
+                    snapshot.DefaultDailyPace = requested;
+                    updatingAccountPace = true;
+                    foreach (SettingsAccount account in snapshot.Accounts)
+                    {
+                        account.DailyPace = requested;
+                        UiCheckBox accountSwitch;
+                        if (accountPaceSwitches.TryGetValue(account.Slot, out accountSwitch))
+                            accountSwitch.Checked = requested;
+                    }
+                    updatingAccountPace = false;
+                }
+                else
+                {
+                    restoringDefaultDailyPace = true;
+                    defaultDailyPace.Checked = snapshot.DefaultDailyPace;
+                    restoringDefaultDailyPace = false;
+                }
+                if (dailyPaceError.Visible == saved)
+                {
+                    dailyPaceError.Visible = !saved;
+                    ResizeCards();
+                }
+            };
+            inner.Controls.Add(defaultDailyPace);
+            inner.Controls.Add(dailyPaceHelp);
+            inner.Controls.Add(dailyPaceError);
             if (snapshot.Accounts.Count == 0)
             {
                 inner = Inner(Card());
@@ -738,6 +996,38 @@ namespace QuotaTrayApp
                 inner.Controls.Add(LevelChoices("level-" + current.Slot, current.NotifyLevel,
                     delegate(int value) { if (actions.SetAccountLevel != null) actions.SetAccountLevel(current.Slot, value); current.NotifyLevel = value;
                         if (pendingGlobalLevel.HasValue) select(pendingGlobalLevel.Value); }, current.Slot));
+                var accountPace = new UiCheckBox
+                {
+                    Name = "daily-pace-" + current.Slot,
+                    Text = T("推荐用量提醒"),
+                    AutoSize = true,
+                    Checked = current.DailyPace,
+                    Enabled = actions.SetAccountDailyPace != null,
+                    Margin = new Padding(0, LayoutGap, 0, 0)
+                };
+                Label accountPaceError = HelpText("保存失败，请重试。", "daily-pace-error-" + current.Slot);
+                accountPaceError.Visible = false;
+                accountPace.CheckedChanged += delegate
+                {
+                    if (updatingAccountPace) return;
+                    bool requested = accountPace.Checked;
+                    bool saved = actions.SetAccountDailyPace != null && actions.SetAccountDailyPace(current.Slot, requested);
+                    if (saved) current.DailyPace = requested;
+                    else
+                    {
+                        updatingAccountPace = true;
+                        accountPace.Checked = current.DailyPace;
+                        updatingAccountPace = false;
+                    }
+                    if (accountPaceError.Visible == saved)
+                    {
+                        accountPaceError.Visible = !saved;
+                        ResizeCards();
+                    }
+                };
+                accountPaceSwitches[current.Slot] = accountPace;
+                inner.Controls.Add(accountPace);
+                inner.Controls.Add(accountPaceError);
             }
         }
         private FlowLayoutPanel NotifyVolumeRow(Label soundError)
@@ -988,6 +1278,7 @@ namespace QuotaTrayApp
             {
                 Graphics graphics = e.Graphics;
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.PixelOffsetMode = PixelOffsetMode.Default;
                 graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 using (var format = new StringFormat(StringFormat.GenericTypographic))
                 using (var oldInk = new SolidBrush(ForeColor))
@@ -1028,7 +1319,14 @@ namespace QuotaTrayApp
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { tips.Dispose(); themeTimer.Dispose(); currentNoticeTimer.Dispose(); }
+            if (disposing)
+            {
+                if (wheelFilter != null) Application.RemoveMessageFilter(wheelFilter);
+                scrollTimer.Dispose();
+                tips.Dispose();
+                themeTimer.Dispose();
+                currentNoticeTimer.Dispose();
+            }
             base.Dispose(disposing);
         }
     }
@@ -1202,6 +1500,41 @@ namespace QuotaTrayApp
     // Shared geometry and palette for settings and its owned dialogs. Tray drawing stays separate.
     internal static class UiTheme
     {
+        private static bool serifChecked;
+        private static FontFamily cachedZhSerifFamily, cachedSansFamily;
+        internal static FontFamily FontFamilyFor(string language = null)
+        {
+            string resolved = L.Guess(language ?? L.Lang);
+            if (resolved == "zh")
+            {
+                if (!serifChecked)
+                {
+                    serifChecked = true;
+                    foreach (string name in new[] { "Noto Serif SC", "Source Han Serif SC", "Songti SC" })
+                    {
+                        try
+                        {
+                            var family = new FontFamily(name);
+                            if (family.IsStyleAvailable(FontStyle.Regular)) { cachedZhSerifFamily = family; break; }
+                            family.Dispose();
+                        }
+                        catch { }
+                    }
+                }
+                if (cachedZhSerifFamily != null) return cachedZhSerifFamily;
+            }
+            if (cachedSansFamily == null)
+            {
+                try { cachedSansFamily = new FontFamily("Microsoft YaHei UI"); }
+                catch { cachedSansFamily = FontFamily.GenericSansSerif; }
+            }
+            return cachedSansFamily;
+        }
+        internal static Font UiFont(float size, FontStyle style = FontStyle.Regular, string language = null)
+        {
+            return new Font(FontFamilyFor(language), size, style);
+        }
+
         internal const int WindowRadius = 8;
         internal const int Radius = 6;
         internal const int CardRadius = 10;
@@ -1397,16 +1730,22 @@ namespace QuotaTrayApp
                 TextRenderer.DrawText(g, text, font, bounds, color, flags);
                 return;
             }
+            PixelOffsetMode previousOffset = g.PixelOffsetMode;
+            g.PixelOffsetMode = PixelOffsetMode.Default;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
-            using (Brush brush = new SolidBrush(color))
+            try
             {
-                fmt.Alignment = (flags & TextFormatFlags.HorizontalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
-                fmt.LineAlignment = (flags & TextFormatFlags.VerticalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
-                fmt.Trimming = (flags & TextFormatFlags.EndEllipsis) != 0 ? StringTrimming.EllipsisCharacter : StringTrimming.None;
-                fmt.FormatFlags = (flags & TextFormatFlags.SingleLine) != 0 ? StringFormatFlags.NoWrap : 0;
-                g.DrawString(text, font, brush, bounds, fmt);
+                using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
+                using (Brush brush = new SolidBrush(color))
+                {
+                    fmt.Alignment = (flags & TextFormatFlags.HorizontalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
+                    fmt.LineAlignment = (flags & TextFormatFlags.VerticalCenter) != 0 ? StringAlignment.Center : StringAlignment.Near;
+                    fmt.Trimming = (flags & TextFormatFlags.EndEllipsis) != 0 ? StringTrimming.EllipsisCharacter : StringTrimming.None;
+                    fmt.FormatFlags = (flags & TextFormatFlags.SingleLine) != 0 ? StringFormatFlags.NoWrap : 0;
+                    g.DrawString(text, font, brush, bounds, fmt);
+                }
             }
+            finally { g.PixelOffsetMode = previousOffset; }
         }
         internal static void Present(Form form)
         {
@@ -1838,9 +2177,29 @@ namespace QuotaTrayApp
     }
     internal sealed class UiFlowPanel : FlowLayoutPanel
     {
+        internal Func<Point> GetCustomScroll;
+        internal Action<Point> SetCustomScroll;
+        internal Action AfterCustomLayout;
+        internal bool SuppressLayout;
         internal UiFlowPanel()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+        public new Point AutoScrollPosition
+        {
+            get { return GetCustomScroll != null ? GetCustomScroll() : base.AutoScrollPosition; }
+            set { if (SetCustomScroll != null) SetCustomScroll(value); else base.AutoScrollPosition = value; }
+        }
+        protected override void OnLayout(LayoutEventArgs levent)
+        {
+            if (SuppressLayout) return;
+            SuppressLayout = true;
+            try
+            {
+                base.OnLayout(levent);
+                if (AfterCustomLayout != null) AfterCustomLayout();
+            }
+            finally { SuppressLayout = false; }
         }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
@@ -1856,6 +2215,128 @@ namespace QuotaTrayApp
         {
             base.OnScroll(se);
             if (UiTheme.IsGlass(this)) Invalidate();
+        }
+    }
+    internal sealed class UiScrollBar : Control
+    {
+        private int viewport = 1, total = 1, maxScroll;
+        private double current, overscroll;
+        private bool hover, dragging;
+        private int dragOffset;
+        internal event Action<int> Scrolled;
+        internal event Action<int> WheelDelta;
+
+        internal UiScrollBar()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+        }
+
+        internal void UpdateMetrics(int viewHeight, int totalHeight, double currentScroll, double bounceOffset, int maximum)
+        {
+            viewport = Math.Max(1, viewHeight);
+            total = Math.Max(viewport, totalHeight);
+            current = currentScroll;
+            overscroll = bounceOffset;
+            maxScroll = Math.Max(0, maximum);
+            Invalidate();
+        }
+
+        internal Rectangle ThumbBounds()
+        {
+            float s = UiTheme.DpiScaleOf(this);
+            int minH = UiTheme.S(26, s);
+            int padY = UiTheme.S(2, s);
+            int trackH = Math.Max(1, Height - padY * 2);
+            double ratio = Math.Min(1.0, (double)viewport / total);
+            int thumbH = Math.Max(minH, (int)Math.Round(trackH * ratio));
+            int squeeze = Math.Min(Math.Max(0, thumbH - UiTheme.S(16, s)), (int)Math.Round(Math.Abs(overscroll) * 0.45));
+            thumbH = Math.Max(UiTheme.S(16, s), thumbH - squeeze);
+            int travel = Math.Max(0, trackH - thumbH);
+            double frac = maxScroll <= 0 ? 0.0 : Math.Max(0.0, Math.Min(1.0, current / maxScroll));
+            int y = padY + (int)Math.Round(travel * frac);
+            if (overscroll < -0.5) y = padY;
+            else if (overscroll > 0.5) y = padY + trackH - thumbH;
+            int w = UiTheme.S(hover || dragging ? 6 : 4, s);
+            int x = Width - w - UiTheme.S(2, s);
+            return new Rectangle(Math.Max(0, x), y, w, Math.Min(trackH, thumbH));
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || maxScroll <= 0) return;
+            Rectangle thumb = ThumbBounds();
+            if (e.Y >= thumb.Top && e.Y <= thumb.Bottom)
+            {
+                dragging = true;
+                dragOffset = e.Y - thumb.Top;
+                Capture = true;
+                Invalidate();
+            }
+            else
+            {
+                float s = UiTheme.DpiScaleOf(this);
+                int padY = UiTheme.S(2, s);
+                int trackH = Math.Max(1, Height - padY * 2);
+                int travel = Math.Max(1, trackH - thumb.Height);
+                double frac = Math.Max(0.0, Math.Min(1.0, (double)(e.Y - padY - thumb.Height / 2) / travel));
+                if (Scrolled != null) Scrolled((int)Math.Round(frac * maxScroll));
+            }
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!dragging || maxScroll <= 0) return;
+            float s = UiTheme.DpiScaleOf(this);
+            int padY = UiTheme.S(2, s);
+            int trackH = Math.Max(1, Height - padY * 2);
+            int thumbH = ThumbBounds().Height;
+            int travel = Math.Max(1, trackH - thumbH);
+            double frac = Math.Max(0.0, Math.Min(1.0, (double)(e.Y - padY - dragOffset) / travel));
+            if (Scrolled != null) Scrolled((int)Math.Round(frac * maxScroll));
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (dragging)
+            {
+                dragging = false;
+                Capture = false;
+                Invalidate();
+            }
+        }
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if (WheelDelta != null) WheelDelta(e.Delta);
+            base.OnMouseWheel(e);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            if (total <= viewport) return;
+            Rectangle thumb = ThumbBounds();
+            if (thumb.Width < 2 || thumb.Height < 4) return;
+            Color fill;
+            if (SystemInformation.HighContrast)
+                fill = dragging ? SystemColors.Highlight : SystemColors.ControlDark;
+            else if (UiTheme.Dark)
+                fill = dragging ? Color.FromArgb(204, UiTheme.Blend(Color.FromArgb(215, 226, 222), UiTheme.Accent, 72))
+                    : Color.FromArgb(hover ? 154 : 92, 206, 218, 214);
+            else
+                fill = dragging ? Color.FromArgb(182, UiTheme.Blend(Color.FromArgb(46, 62, 56), UiTheme.Accent, 76))
+                    : Color.FromArgb(hover ? 128 : 74, 42, 56, 52);
+
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            using (GraphicsPath pill = UiTheme.Round(new RectangleF(thumb.X, thumb.Y, thumb.Width, thumb.Height), thumb.Width / 2f))
+            using (Brush brush = new SolidBrush(fill))
+                e.Graphics.FillPath(brush, pill);
         }
     }
     internal sealed class UiPanel : Panel
@@ -1894,23 +2375,29 @@ namespace QuotaTrayApp
         protected override void OnPaint(PaintEventArgs e)
         {
             if (!UiTheme.IsGlass(this)) { base.OnPaint(e); return; }
+            PixelOffsetMode previousOffset = e.Graphics.PixelOffsetMode;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Default;
             e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             Color color = Enabled ? ForeColor : UiTheme.Muted;
-            using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
-            using (Brush brush = new SolidBrush(color))
+            try
             {
-                fmt.HotkeyPrefix = UseMnemonic ? HotkeyPrefix.Show : HotkeyPrefix.None;
-                if (AutoEllipsis) fmt.Trimming = StringTrimming.EllipsisCharacter;
-                if (TextAlign == ContentAlignment.MiddleLeft || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.MiddleRight)
-                    fmt.LineAlignment = StringAlignment.Center;
-                else if (TextAlign == ContentAlignment.BottomLeft || TextAlign == ContentAlignment.BottomCenter || TextAlign == ContentAlignment.BottomRight)
-                    fmt.LineAlignment = StringAlignment.Far;
-                if (TextAlign == ContentAlignment.TopCenter || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.BottomCenter)
-                    fmt.Alignment = StringAlignment.Center;
-                else if (TextAlign == ContentAlignment.TopRight || TextAlign == ContentAlignment.MiddleRight || TextAlign == ContentAlignment.BottomRight)
-                    fmt.Alignment = StringAlignment.Far;
-                e.Graphics.DrawString(Text, Font, brush, ClientRectangle, fmt);
+                using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
+                using (Brush brush = new SolidBrush(color))
+                {
+                    fmt.HotkeyPrefix = UseMnemonic ? HotkeyPrefix.Show : HotkeyPrefix.None;
+                    if (AutoEllipsis) fmt.Trimming = StringTrimming.EllipsisCharacter;
+                    if (TextAlign == ContentAlignment.MiddleLeft || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.MiddleRight)
+                        fmt.LineAlignment = StringAlignment.Center;
+                    else if (TextAlign == ContentAlignment.BottomLeft || TextAlign == ContentAlignment.BottomCenter || TextAlign == ContentAlignment.BottomRight)
+                        fmt.LineAlignment = StringAlignment.Far;
+                    if (TextAlign == ContentAlignment.TopCenter || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.BottomCenter)
+                        fmt.Alignment = StringAlignment.Center;
+                    else if (TextAlign == ContentAlignment.TopRight || TextAlign == ContentAlignment.MiddleRight || TextAlign == ContentAlignment.BottomRight)
+                        fmt.Alignment = StringAlignment.Far;
+                    e.Graphics.DrawString(Text, Font, brush, ClientRectangle, fmt);
+                }
             }
+            finally { e.Graphics.PixelOffsetMode = previousOffset; }
         }
     }
     internal sealed class AlphaTextBox : TextBox
@@ -2406,7 +2893,7 @@ namespace QuotaTrayApp
         {
             int x = (int)Math.Round(ValueX(stops[index]));
             int width = TextRenderer.MeasureText(labels[index], Font).Width;
-            return new Rectangle(x - width / 2, D(35), width, Height - D(35));
+            return new Rectangle(x - width / 2, D(34), width, Height - D(34));
         }
         private void PaintScale(Graphics graphics)
         {
@@ -2465,7 +2952,7 @@ namespace QuotaTrayApp
             int remaining=quota==null ? 0 : QuotaWindow.Remaining(quota.used);
             Color color = quota == null ? UiTheme.Muted : superseded ? (UiTheme.Dark ? Color.FromArgb(102, 110, 122) : Color.FromArgb(158, 168, 178)) : UiTheme.QuotaColor(remaining);
             Color mutedInk = superseded ? (UiTheme.Dark ? Color.FromArgb(128, 136, 148) : Color.FromArgb(106, 114, 124)) : (UiTheme.IsGlass(this) ? UiTheme.GlassMuted : UiTheme.Muted);
-            UiTheme.DrawText(this,e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,UiTheme.S(20,s)),mutedInk,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            UiTheme.DrawText(this,e.Graphics,title+" · "+L.T("剩余"),Font,new Rectangle(0,0,Width,UiTheme.S(22,s)),mutedInk,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
             string amount=quota==null ? "—" : remaining+"%";
             if (largeFont == null || !Equals(largeFontFamily, Font.FontFamily))
             {
@@ -2925,7 +3412,7 @@ namespace QuotaTrayApp
             SetStyle(ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer|ControlStyles.Selectable|ControlStyles.ResizeRedraw,true);
             Size=new Size(UiTheme.S(184,s),UiTheme.S(33,s));Margin=new Padding(0,0,0,UiTheme.S(10,s));TabStop=true;AccessibleRole=AccessibleRole.ComboBox;Cursor=Cursors.Hand;
         }
-        private bool PopupOpen { get { return popup != null && !popup.IsDisposed; } }
+        internal bool PopupOpen { get { return popup != null && !popup.IsDisposed; } }
         protected override bool IsInputKey(Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
@@ -3457,7 +3944,8 @@ namespace QuotaTrayApp
                 using (var danger = new SolidBrush(menu && UiTheme.Dark ? UiTheme.QuotaInk(0) : dangerInk))
                 using (var format = new StringFormat(StringFormat.GenericDefault))
                 {
-                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                    g.PixelOffsetMode = PixelOffsetMode.Default;
+                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                     format.LineAlignment = StringAlignment.Center;
                     format.Trimming = StringTrimming.EllipsisCharacter;
                     format.FormatFlags |= StringFormatFlags.NoWrap;
@@ -3617,12 +4105,16 @@ namespace QuotaTrayApp
     {
         private const int TrayCallback = 0x800, ContextMenu = 0x7b, MouseMove = 0x200;
         private const int RightDown = 0x204, RightUp = 0x205, PopupOpen = 0x406;
-        private const uint SetVersion = 4, CustomTooltipVersion = 4;
+        private const uint AddIcon = 0, ModifyIcon = 1, DeleteIcon = 2, SetVersion = 4, CustomTooltipVersion = 4;
+        private const uint NifMessage = 0x01, NifIcon = 0x02;
+        internal const uint CleanRegistrationFlags = NifMessage | NifIcon;
+        internal const uint IconUpdateFlags = NifIcon;
         private static readonly int TaskbarCreated = RegisterWindowMessage("TaskbarCreated");
         private static readonly System.Reflection.BindingFlags IconFields =
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         private static readonly System.Reflection.FieldInfo IdField = typeof(NotifyIcon).GetField("id", IconFields);
         private static readonly System.Reflection.FieldInfo WindowField = typeof(NotifyIcon).GetField("window", IconFields);
+        private static readonly System.Reflection.FieldInfo IconField = typeof(NotifyIcon).GetField("icon", IconFields);
         private readonly NotifyIcon icon;
         private readonly UiTrayMenu menu;
         private uint id;
@@ -3673,42 +4165,92 @@ namespace QuotaTrayApp
             return true;
         }
 
+        internal void SetFallbackTip(string tip)
+        {
+            savedTip = tip ?? "";
+            if (!useCustom)
+            {
+                try { if (icon.Text != savedTip) icon.Text = savedTip; } catch { }
+            }
+        }
+
+        internal void SetIcon(Icon nextIcon)
+        {
+            if (nextIcon == null) return;
+            if (!Enabled || Handle == IntPtr.Zero || IconField == null)
+            {
+                icon.Icon = nextIcon;
+                return;
+            }
+            // Update WinForms' cached icon reference without calling UpdateIcon(), which
+            // hardcodes NIF_TIP and recreates Windows 11 Explorer's empty 28x25 hover box.
+            IconField.SetValue(icon, nextIcon);
+            var modify = new NotifyIconData
+            {
+                Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
+                Window = Handle,
+                Id = id,
+                Flags = IconUpdateFlags,
+                Icon = nextIcon.Handle
+            };
+            Shell_NotifyIconW(ModifyIcon, ref modify);
+        }
+
         internal void SetVisible(bool visible)
         {
             if (icon.Visible == visible) return;
+            if (visible && useCustom)
+            {
+                if (!blanked && !String.IsNullOrEmpty(icon.Text)) savedTip = icon.Text;
+                try { icon.Text = ""; } catch { }
+                blanked = true;
+            }
             icon.Visible = visible;
             version4 = false;
-            if (!visible || !useCustom) return;
+            if (!visible || !useCustom)
+            {
+                if (!visible && !useCustom) RestoreFallbackTip();
+                return;
+            }
             IntPtr window;
             if (!TryGetIdentity(icon, out window, out id)) return;
             if (Handle != window) AssignHandle(window);
-            version4 = ApplyVersion(CustomTooltipVersion);
-            BlankTip();
+            RegisterCleanVersion4();
         }
 
         internal void Disable()
         {
             useCustom = false;
             if (version4 && ApplyVersion(0)) version4 = false;
-            BlankTip();
+            RestoreFallbackTip();
         }
 
-        // Version 4 ignores the tooltip text, but Explorer still builds a small hover host
-        // from it, which is what peeks out from under the quota tip. With no text there is
-        // nothing to build, so the host is never created (not just hidden afterwards).
-        private void BlankTip()
+        private void RestoreFallbackTip()
         {
-            if (version4 && !blanked)
+            if (!blanked && String.IsNullOrEmpty(savedTip)) return;
+            blanked = false;
+            try { icon.Text = savedTip ?? ""; } catch { }
+        }
+
+        // WinForms NotifyIcon always calls Shell_NotifyIcon with NIF_TIP (0x04) even when
+        // Text is "". Windows 11 Explorer builds an empty 28x25 XAML ToolTip host whenever
+        // NIF_TIP is supplied. Replace the icon entry with a clean NIF_MESSAGE | NIF_ICON
+        // registration (no NIF_TIP, no NIF_SHOWTIP) and set NOTIFYICON_VERSION_4.
+        private void RegisterCleanVersion4()
+        {
+            var data = new NotifyIconData
             {
-                savedTip = icon.Text;
-                try { icon.Text = ""; } catch { }
-                blanked = true;
-            }
-            else if (!version4 && blanked)
-            {
-                blanked = false;
-                try { icon.Text = savedTip ?? ""; } catch { }
-            }
+                Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
+                Window = Handle,
+                Id = id
+            };
+            Shell_NotifyIconW(DeleteIcon, ref data);
+            Icon current = icon.Icon;
+            data.Flags = CleanRegistrationFlags;
+            data.Callback = TrayCallback;
+            data.Icon = current != null ? current.Handle : IntPtr.Zero;
+            Shell_NotifyIconW(AddIcon, ref data);
+            version4 = ApplyVersion(CustomTooltipVersion);
         }
 
         // Explorer can drop the version-4 registration when it rebuilds the notification area,
@@ -3720,25 +4262,30 @@ namespace QuotaTrayApp
             if (!useCustom || !icon.Visible) return;
             DateTime now = DateTime.UtcNow;
             if ((now - lastAssert).TotalMilliseconds < 1000) return;
-            Rebind();
+            Rebind(false);
         }
 
         // Identity is re-read every time: Explorer rebuilds the notification area on its own
         // schedule and the window handle or icon id can change underneath us.
-        private void Rebind()
+        private void Rebind(bool forceCleanAdd)
         {
             lastAssert = DateTime.UtcNow;
             IntPtr window;
             uint currentId;
-            if (!useCustom || !icon.Visible || !TryGetIdentity(icon, out window, out currentId)) { version4 = false; BlankTip(); return; }
+            if (!useCustom || !icon.Visible || !TryGetIdentity(icon, out window, out currentId))
+            {
+                version4 = false;
+                return;
+            }
+            bool identityChanged = Handle != window || id != currentId;
             id = currentId;
             if (Handle != window)
             {
                 if (Handle != IntPtr.Zero) ReleaseHandle();
                 AssignHandle(window);
             }
-            version4 = ApplyVersion(CustomTooltipVersion);
-            BlankTip();
+            if (forceCleanAdd || identityChanged || !version4) RegisterCleanVersion4();
+            else version4 = ApplyVersion(CustomTooltipVersion);
         }
 
         private bool ApplyVersion(uint version)
@@ -3749,6 +4296,12 @@ namespace QuotaTrayApp
 
         protected override void WndProc(ref Message message)
         {
+            if (message.Msg == TaskbarCreated && useCustom && icon.Visible)
+            {
+                // Intercept TaskbarCreated before WinForms WmTaskbarCreated sends NIM_ADD with NIF_TIP.
+                Rebind(true);
+                return;
+            }
             if (message.Msg == TrayCallback && version4)
             {
                 int eventId = (int)(message.LParam.ToInt64() & 0xffff);
@@ -3765,7 +4318,6 @@ namespace QuotaTrayApp
                 message.LParam = (IntPtr)eventId;
             }
             base.WndProc(ref message);
-            if (message.Msg == TaskbarCreated) Rebind();
         }
     }
 
@@ -3976,7 +4528,7 @@ namespace QuotaTrayApp
             timer.Start();
             Application.Run(tip);
         }
-        private static Font TipFont(float size) { return new Font("Microsoft YaHei UI", size, FontStyle.Regular); }
+        private static Font TipFont(float size) { return UiTheme.UiFont(size, FontStyle.Regular); }
         // Width must match how the row is drawn segment by segment, or the last
         // segment gets trimmed by a few pixels.
         private static float MeasureRow(Graphics g, Font font, QuotaTipLine line, StringFormat format)
@@ -4022,7 +4574,8 @@ namespace QuotaTrayApp
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 RectangleF body = new RectangleF(shadow, shadow, Width - shadow * 2, Height - shadow * 2);
                 UiBackdrop.PaintPopup(g, body, backdrop.Frame, scale(UiTheme.Dark ? UiTheme.WindowRadius : UiTheme.Radius), scale, 6, true);
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                g.PixelOffsetMode = PixelOffsetMode.Default;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 using (var format = new StringFormat(StringFormat.GenericDefault))
                 using (Font titleFont = TipFont(8.5f))
                 using (var muted = new SolidBrush(UiTheme.Dark ? UiBackdrop.PopupTextColor : Color.FromArgb(66, 76, 88)))

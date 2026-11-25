@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 #if !DISPLAY_POLICY_ONLY
 using System.Diagnostics;
@@ -120,6 +120,7 @@ namespace QuotaTrayApp
         private AccountOverviewForm overviewForm;
         private bool groupActive;
         private string groupError;
+        private readonly DailyPaceTracker dailyPace;
         internal bool Managed { get; private set; }
         internal bool HasOpenWindows { get { return overviewForm != null && !overviewForm.IsDisposed; } }
 
@@ -128,6 +129,7 @@ namespace QuotaTrayApp
             this.host = host; this.root = root; node = nodeExe; codex = codexExe; this.settings = settings; this.menu = menu;
             canQuery = !String.IsNullOrEmpty(codex) && File.Exists(codex);
             script = AccountConnectionForm.EnsureScript(root);
+            dailyPace = DailyPaceTracker.Load(root);
             try { prefs = new JavaScriptSerializer().Deserialize<DisplayPreferences>(File.ReadAllText(Path.Combine(root, "display-settings.json"), Encoding.UTF8)); } catch { prefs = null; }
             worker = new Thread(WorkerLoop); worker.IsBackground = true; worker.Name = "Multi-account quota"; worker.Start();
         }
@@ -300,7 +302,7 @@ namespace QuotaTrayApp
                 var remove = new List<string>();
                 foreach (KeyValuePair<string, State> pair in states)
                     if (!incoming.ContainsKey(pair.Key) || !incoming[pair.Key].connected || !SameIdentity(pair.Value.account.identity, incoming[pair.Key].identity)) remove.Add(pair.Key);
-                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.Visible = false; states[key].icon.Dispose(); } states.Remove(key); }
+                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.Visible = false; states[key].icon.Dispose(); } states.Remove(key); dailyPace.ResetSlot(key); }
                 foreach (ConnectedSlot a in incoming.Values)
                 {
                     if (!a.connected || a.identity == null || string.IsNullOrEmpty(a.identity.userId) || string.IsNullOrEmpty(a.identity.accountId)) continue;
@@ -371,8 +373,23 @@ namespace QuotaTrayApp
             else if (previous != null && previous != desktopSource)
                 host.SyncMultiDesktop(null);
         }
+        private static WindowInfo LongQuotaWindow(ConnectionReply reply)
+        {
+            if (reply == null) return null;
+            if (reply.secondary != null && QuotaWindow.IsLong(reply.secondary.windowMins)) return reply.secondary;
+            if (reply.primary != null && QuotaWindow.IsLong(reply.primary.windowMins)) return reply.primary;
+            return null;
+        }
         private void Evaluate(State s)
         {
+            WindowInfo longWin = LongQuotaWindow(s.reply);
+            if (longWin != null)
+            {
+                DailyPaceDecision pace = dailyPace.Evaluate(s.account.slot, settings.DailyPaceFor(s.account.slot),
+                    longWin.used, longWin.resetsAt, DateTimeOffset.UtcNow);
+                if (pace.Triggered)
+                    host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.DailyPaceBody(), TrayContext.NoSound, AccountMask(s), true);
+            }
             int level = settings.LevelFor(s.account.slot);
             if (level < 0) { s.tier = null; s.fixedWindow = null; s.level = level; return; }
             bool single = s.reply.primary == null || QuotaWindow.IsLong(s.reply.primary.windowMins);
@@ -408,8 +425,8 @@ namespace QuotaTrayApp
                     var icon = new NotifyIcon(); icon.ContextMenuStrip = menu;
                     ((UiTrayMenu)menu).Track(icon);
                     icon.Icon = TrayContext.MakeMultiIcon(s.reply);
-                    icon.Text = ShortText(LabelFor(s));
                     s.hover = new TrayIconHover(icon, (UiTrayMenu)menu);
+                    s.hover.SetFallbackTip(ShortText(LabelFor(s)));
                     icon.MouseDown += delegate { selected = captured.account.slot; host.HideQuotaTip(); host.PrepareMultiMenu(selected, LabelFor(captured)); };
                     icon.MouseMove += delegate
                     {
@@ -450,14 +467,15 @@ namespace QuotaTrayApp
                 if (key != s.iconKey)
                 {
                     Icon old = s.icon.Icon;
-                    s.icon.Icon = TrayContext.MakeMultiIcon(s.reply);
+                    s.hover.SetIcon(TrayContext.MakeMultiIcon(s.reply));
                     s.iconKey = key;
                     if (old != null && old != SystemIcons.Application) old.Dispose();
                 }
             }
             string tooltip = BuildNativeTooltip(s.account.slot, s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan),
                 s.account.emailMask ?? (s.account.identity == null ? null : s.account.identity.emailMask), s.reply, s.error, s.lastSuccess);
-            // The custom hint keeps the icon text empty on purpose; see TrayIconHover.BlankTip.
+            // Keep NIF_TIP absent while custom hover owns the icon; store fallback text internally.
+            s.hover.SetFallbackTip(tooltip);
             if (!s.hover.Enabled && tooltip != s.icon.Text) s.icon.Text = tooltip;
             if (s.hover.Enabled && !host.RefreshQuotaTip(s.icon, LabelFor(s), s.reply, s.error, s.lastSuccess))
                 s.hover.Disable();
@@ -591,7 +609,7 @@ namespace QuotaTrayApp
                 int line = full.IndexOf('\n');
                 string plan=PlanTitle(s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan));
                 string email=AccountMask(s);
-                rows.Add(new SettingsAccount { Primary = s.reply == null ? null : s.reply.primary, Secondary = s.reply == null ? null : s.reply.secondary, Failed = s.error != null && s.error != "not_checked", Slot = slot, DisplayNumber = SlotNumber(slot), Plan = plan, EmailMask = email, Label = LabelFor(s), Quota = line < 0 ? L.T("正在读取额度…") : full.Substring(line + 1), Visible = prefs != null && Array.IndexOf(prefs.traySlots, slot) >= 0, NotifyLevel = settings.LevelFor(slot) });
+                rows.Add(new SettingsAccount { Primary = s.reply == null ? null : s.reply.primary, Secondary = s.reply == null ? null : s.reply.secondary, Failed = s.error != null && s.error != "not_checked", Slot = slot, DisplayNumber = SlotNumber(slot), Plan = plan, EmailMask = email, Label = LabelFor(s), Quota = line < 0 ? L.T("正在读取额度…") : full.Substring(line + 1), Visible = prefs != null && Array.IndexOf(prefs.traySlots, slot) >= 0, NotifyLevel = settings.LevelFor(slot), DailyPace = settings.DailyPaceFor(slot) });
             }
             return rows;
         }
@@ -670,7 +688,7 @@ namespace QuotaTrayApp
 
         internal AccountOverviewForm(IList<AccountOverviewRow> rows, Action refreshAll)
         {
-            Text = L.T("额度详情"); Font = SystemFonts.MessageBoxFont; AutoScaleMode = AutoScaleMode.Font;
+            Text = L.T("额度详情"); Font = UiTheme.UiFont(SystemFonts.MessageBoxFont.SizeInPoints); AutoScaleMode = AutoScaleMode.Font;
             StartPosition = FormStartPosition.CenterScreen; ShowIcon = false; MinimizeBox = false;
             bool dark = TrayContext.IsDarkMode();
             BackColor = dark ? Color.FromArgb(32, 32, 32) : SystemColors.Window;
