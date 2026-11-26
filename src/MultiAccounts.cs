@@ -92,6 +92,10 @@ namespace QuotaTrayApp
             internal NotifyWindow tier, fixedWindow;
             internal int level = int.MinValue;
             internal bool single;
+            internal DateTime lastCreditDetailUtc = DateTime.MinValue;
+            internal int lastCreditCount = -1;
+            internal bool forceCreditDetail;
+            internal ResetCreditsInfo cachedResetCredits;
         }
         private sealed class WorkResult
         {
@@ -99,6 +103,7 @@ namespace QuotaTrayApp
             internal ConnectionReply reply;
             internal ConnectedIdentity expected;
             internal int generation;
+            internal bool creditDetailsRequested;
         }
         private readonly TrayContext host;
         private readonly string root, node, codex, script;
@@ -121,6 +126,7 @@ namespace QuotaTrayApp
         private bool groupActive;
         private string groupError;
         private readonly DailyPaceTracker dailyPace;
+        private readonly ResetCreditTracker resetCreditsTracker;
         internal bool Managed { get; private set; }
         internal bool HasOpenWindows { get { return overviewForm != null && !overviewForm.IsDisposed; } }
 
@@ -130,6 +136,7 @@ namespace QuotaTrayApp
             canQuery = !String.IsNullOrEmpty(codex) && File.Exists(codex);
             script = AccountConnectionForm.EnsureScript(root);
             dailyPace = DailyPaceTracker.Load(root);
+            resetCreditsTracker = ResetCreditTracker.Load(root);
             try { prefs = new JavaScriptSerializer().Deserialize<DisplayPreferences>(File.ReadAllText(Path.Combine(root, "display-settings.json"), Encoding.UTF8)); } catch { prefs = null; }
             worker = new Thread(WorkerLoop); worker.IsBackground = true; worker.Name = "Multi-account quota"; worker.Start();
         }
@@ -183,8 +190,8 @@ namespace QuotaTrayApp
             DateTime next = DateTime.MinValue;
             while (!stopped)
             {
-                bool list; string single; bool all; int gen;
-                lock (gate) { list = listNeeded; listNeeded = false; single = refreshSlot; refreshSlot = null; all = refreshAll || DateTime.UtcNow >= next; refreshAll = false; gen = generation; }
+                bool list; string single; bool manualAll; bool all; int gen;
+                lock (gate) { list = listNeeded; listNeeded = false; single = refreshSlot; refreshSlot = null; manualAll = refreshAll; all = manualAll || DateTime.UtcNow >= next; refreshAll = false; gen = generation; }
                 if (list)
                 {
                     ConnectionReply reply = Execute("list", "");
@@ -194,21 +201,34 @@ namespace QuotaTrayApp
                 }
                 else if (canQuery && (single != null || all))
                 {
+                    bool manualRefresh = single != null || manualAll;
                     List<ConnectedSlot> snapshot = new List<ConnectedSlot>();
-                    lock (gate) foreach (State s in states.Values) if (single == null || s.account.slot == single) snapshot.Add(s.account);
+                    var detailFlags = new Dictionary<string, bool>(StringComparer.Ordinal);
+                    lock (gate)
+                    {
+                        foreach (State s in states.Values)
+                        {
+                            if (single != null && s.account.slot != single) continue;
+                            snapshot.Add(s.account);
+                            bool needDetails = manualRefresh || s.lastCreditDetailUtc == DateTime.MinValue || s.forceCreditDetail ||
+                                (DateTime.UtcNow - s.lastCreditDetailUtc).TotalMinutes >= ResetCreditTracker.DetailIntervalMinutes;
+                            detailFlags[s.account.slot] = needDetails;
+                        }
+                    }
                     snapshot.Sort(delegate(ConnectedSlot a, ConnectedSlot b) { return string.CompareOrdinal(a.slot, b.slot); });
                     foreach (ConnectedSlot account in snapshot)
                     {
                         if (stopped) break;
-                        ConnectionReply reply = Execute("query", account.slot);
-                        lock (gate) results.Enqueue(new WorkResult { command = "query", slot = account.slot, expected = account.identity, reply = reply, generation = gen });
+                        bool includeDetails = detailFlags.ContainsKey(account.slot) && detailFlags[account.slot];
+                        ConnectionReply reply = Execute("query", account.slot, includeDetails);
+                        lock (gate) results.Enqueue(new WorkResult { command = "query", slot = account.slot, expected = account.identity, reply = reply, generation = gen, creditDetailsRequested = includeDetails });
                     }
                     next = DateTime.UtcNow.AddSeconds(30);
                 }
                 else wake.WaitOne(500);
             }
         }
-        private ConnectionReply Execute(string command, string slot)
+        private ConnectionReply Execute(string command, string slot, bool includeCreditDetails = true)
         {
             lock (AccountOperationGate.Sync)
             {
@@ -221,6 +241,7 @@ namespace QuotaTrayApp
                     psi.StandardOutputEncoding = Encoding.UTF8; psi.StandardErrorEncoding = Encoding.UTF8;
                     if (command != "list" && (!Path.IsPathRooted(codex) || !File.Exists(codex))) return new ConnectionReply { code = "client_error" };
                     if (!string.IsNullOrEmpty(codex)) psi.EnvironmentVariables["CODEX_CLI_PATH"] = codex;
+                    if (command == "query") psi.EnvironmentVariables["CODEX_QUOTA_CREDIT_DETAILS"] = includeCreditDetails ? "1" : "0";
                     using (Process p = new Process())
                     {
                         p.StartInfo = psi; p.ErrorDataReceived += delegate { };
@@ -302,7 +323,7 @@ namespace QuotaTrayApp
                 var remove = new List<string>();
                 foreach (KeyValuePair<string, State> pair in states)
                     if (!incoming.ContainsKey(pair.Key) || !incoming[pair.Key].connected || !SameIdentity(pair.Value.account.identity, incoming[pair.Key].identity)) remove.Add(pair.Key);
-                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.Visible = false; states[key].icon.Dispose(); } states.Remove(key); dailyPace.ResetSlot(key); }
+                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.Visible = false; states[key].icon.Dispose(); } states.Remove(key); dailyPace.ResetSlot(key); resetCreditsTracker.ResetSlot(key); }
                 foreach (ConnectedSlot a in incoming.Values)
                 {
                     if (!a.connected || a.identity == null || string.IsNullOrEmpty(a.identity.userId) || string.IsNullOrEmpty(a.identity.accountId)) continue;
@@ -353,15 +374,56 @@ namespace QuotaTrayApp
                 if (!ValidWindow(r.secondary)) r.secondary = null;
                 r = TrayContext.NormalizeMultiReply(r);
                 s.reply = r; s.lastSuccess = DateTime.Now; s.error = null;
+                MergeResetCredits(s, r, work.creditDetailsRequested);
                 string updatedPlan = SafePlan(r.identity.plan);
                 if (updatedPlan != "unknown") s.account.plan = updatedPlan;
                 s.account.emailMask = Mask(r.identity.emailMask);
-                Evaluate(s);
+                Evaluate(s, work.creditDetailsRequested);
             }
             UpdateIcon(s);
             SyncDesktop();
             SyncGroup();
             SaveStatus();
+        }
+        private void MergeResetCredits(State s, ConnectionReply r, bool creditDetailsRequested)
+        {
+            if (r == null || r.resetCredits == null)
+            {
+                if (s.cachedResetCredits != null && r != null) r.resetCredits = s.cachedResetCredits;
+                return;
+            }
+            if (r.resetCredits.hasDetails)
+            {
+                s.cachedResetCredits = r.resetCredits;
+                s.lastCreditDetailUtc = DateTime.UtcNow;
+                s.lastCreditCount = r.resetCredits.availableCount;
+                s.forceCreditDetail = false;
+                return;
+            }
+            bool countChanged = s.lastCreditCount != r.resetCredits.availableCount;
+            s.lastCreditCount = r.resetCredits.availableCount;
+            if (r.resetCredits.availableCount == 0)
+            {
+                s.cachedResetCredits = r.resetCredits;
+                s.forceCreditDetail = false;
+                if (creditDetailsRequested) s.lastCreditDetailUtc = DateTime.UtcNow;
+                return;
+            }
+            if (countChanged && !creditDetailsRequested)
+            {
+                s.forceCreditDetail = true;
+                lock (gate) if (refreshSlot == null) refreshSlot = s.account.slot;
+                wake.Set();
+            }
+            else if (s.cachedResetCredits != null && s.cachedResetCredits.availableCount == r.resetCredits.availableCount)
+            {
+                r.resetCredits = s.cachedResetCredits;
+            }
+            if (creditDetailsRequested)
+            {
+                s.lastCreditDetailUtc = DateTime.UtcNow;
+                s.forceCreditDetail = false;
+            }
         }
         private void SyncDesktop()
         {
@@ -380,7 +442,7 @@ namespace QuotaTrayApp
             if (reply.primary != null && QuotaWindow.IsLong(reply.primary.windowMins)) return reply.primary;
             return null;
         }
-        private void Evaluate(State s)
+        private void Evaluate(State s, bool creditDetailsRequested)
         {
             WindowInfo longWin = LongQuotaWindow(s.reply);
             if (longWin != null)
@@ -390,6 +452,12 @@ namespace QuotaTrayApp
                 if (pace.Triggered)
                     host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.DailyPaceBody(), TrayContext.NoSound, AccountMask(s), true);
             }
+            ResetCreditDecision rc = resetCreditsTracker.Evaluate(s.account.slot, settings.ResetCreditFor(s.account.slot),
+                s.reply.resetCredits, DateTimeOffset.UtcNow, creditDetailsRequested);
+            if (rc.NewCreditTriggered)
+                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditNewBody(rc.AvailableCount, rc.SoonestExpiresAt), TrayContext.RecoverySound, AccountMask(s), false);
+            else if (rc.ExpiringTriggered)
+                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditExpiringBody(rc.AvailableCount, rc.ExpiringSoonestAt), "notify.wav", AccountMask(s), false);
             int level = settings.LevelFor(s.account.slot);
             if (level < 0) { s.tier = null; s.fixedWindow = null; s.level = level; return; }
             bool single = s.reply.primary == null || QuotaWindow.IsLong(s.reply.primary.windowMins);
@@ -609,7 +677,7 @@ namespace QuotaTrayApp
                 int line = full.IndexOf('\n');
                 string plan=PlanTitle(s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan));
                 string email=AccountMask(s);
-                rows.Add(new SettingsAccount { Primary = s.reply == null ? null : s.reply.primary, Secondary = s.reply == null ? null : s.reply.secondary, Failed = s.error != null && s.error != "not_checked", Slot = slot, DisplayNumber = SlotNumber(slot), Plan = plan, EmailMask = email, Label = LabelFor(s), Quota = line < 0 ? L.T("正在读取额度…") : full.Substring(line + 1), Visible = prefs != null && Array.IndexOf(prefs.traySlots, slot) >= 0, NotifyLevel = settings.LevelFor(slot), DailyPace = settings.DailyPaceFor(slot) });
+                rows.Add(new SettingsAccount { Primary = s.reply == null ? null : s.reply.primary, Secondary = s.reply == null ? null : s.reply.secondary, ResetCredits = s.reply == null ? s.cachedResetCredits : (s.reply.resetCredits ?? s.cachedResetCredits), Failed = s.error != null && s.error != "not_checked", Slot = slot, DisplayNumber = SlotNumber(slot), Plan = plan, EmailMask = email, Label = LabelFor(s), Quota = line < 0 ? L.T("正在读取额度…") : full.Substring(line + 1), Visible = prefs != null && Array.IndexOf(prefs.traySlots, slot) >= 0, NotifyLevel = settings.LevelFor(slot), DailyPace = settings.DailyPaceFor(slot), ResetCredit = settings.ResetCreditFor(slot) });
             }
             return rows;
         }

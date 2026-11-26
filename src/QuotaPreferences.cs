@@ -313,4 +313,287 @@ namespace QuotaTrayApp
         private static string SafeSlot(string slot) { return string.IsNullOrEmpty(slot) ? "single" : slot; }
         private static string SanitizeField(string value) { return string.IsNullOrEmpty(value) ? "" : value.Replace("|", "").Replace("\r", "").Replace("\n", ""); }
     }
+
+    internal sealed class ResetCreditDecision
+    {
+        internal bool Initialized;
+        internal bool StateChanged;
+        internal bool NewCreditTriggered;
+        internal bool ExpiringTriggered;
+        internal int AvailableCount;
+        internal int NewCreditCount;
+        internal int ExpiringCount;
+        internal double SoonestExpiresAt;
+        internal double ExpiringSoonestAt;
+        internal string Reason = "";
+    }
+
+    internal sealed class ResetCreditSlotState
+    {
+        internal bool Initialized;
+        internal int LastKnownCount;
+        internal readonly HashSet<string> KnownIds = new HashSet<string>(StringComparer.Ordinal);
+        internal readonly HashSet<string> ExpiringNotifiedIds = new HashSet<string>(StringComparer.Ordinal);
+    }
+
+    // 仅只读跟踪重置券张数与过期时间，绝不自动核销；首轮静默建基线，新券或 24 小时内临期才提醒。
+    internal sealed class ResetCreditTracker
+    {
+        internal const double ExpiringSoonSeconds = 24.0 * 3600.0;
+        internal const int DetailIntervalMinutes = 15;
+
+        private readonly Dictionary<string, ResetCreditSlotState> states =
+            new Dictionary<string, ResetCreditSlotState>(StringComparer.Ordinal);
+        private string storageRoot;
+
+        internal static double SoonestExpiry(ResetCreditsInfo info, DateTimeOffset nowUtc)
+        {
+            if (info == null || !info.hasDetails || info.credits == null) return 0.0;
+            double nowUnix = nowUtc.ToUnixTimeSeconds();
+            double soonest = 0.0;
+            foreach (ResetCreditItem item in info.credits)
+            {
+                if (!IsActiveItem(item, nowUnix) || item.expiresAt <= nowUnix) continue;
+                if (soonest <= 0.0 || item.expiresAt < soonest) soonest = item.expiresAt;
+            }
+            return soonest;
+        }
+
+        private static bool IsActiveItem(ResetCreditItem item, double nowUnix)
+        {
+            if (item == null || string.IsNullOrEmpty(item.id)) return false;
+            if (!string.IsNullOrEmpty(item.status) && item.status != "available") return false;
+            if (item.expiresAt > 0.0 && item.expiresAt <= nowUnix) return false;
+            return true;
+        }
+
+        internal void ResetSlot(string slot)
+        {
+            string key = SafeSlot(slot);
+            if (!states.Remove(key)) return;
+            SaveIfConfigured();
+        }
+
+        internal void Clear()
+        {
+            if (states.Count == 0) return;
+            states.Clear();
+            SaveIfConfigured();
+        }
+
+        internal ResetCreditDecision Evaluate(string slot, bool enabled, ResetCreditsInfo info, DateTimeOffset nowUtc, bool allowCountOnly = false)
+        {
+            string key = SafeSlot(slot);
+            var decision = new ResetCreditDecision();
+            if (info == null || info.availableCount < 0)
+            {
+                decision.Reason = "unavailable";
+                return decision;
+            }
+
+            double nowUnix = nowUtc.ToUnixTimeSeconds();
+            double soonest = SoonestExpiry(info, nowUtc);
+            decision.AvailableCount = info.availableCount;
+            decision.SoonestExpiresAt = soonest;
+
+            ResetCreditSlotState state;
+            if (!states.TryGetValue(key, out state))
+            {
+                state = new ResetCreditSlotState();
+                states[key] = state;
+            }
+
+            var activeItems = new List<ResetCreditItem>();
+            var activeIdSet = new HashSet<string>(StringComparer.Ordinal);
+            if (info.hasDetails && info.credits != null)
+            {
+                foreach (ResetCreditItem item in info.credits)
+                {
+                    if (!IsActiveItem(item, nowUnix)) continue;
+                    if (activeIdSet.Add(item.id)) activeItems.Add(item);
+                }
+            }
+
+            if (!state.Initialized)
+            {
+                state.Initialized = true;
+                state.LastKnownCount = info.availableCount;
+                if (info.hasDetails)
+                    foreach (string id in activeIdSet) state.KnownIds.Add(id);
+                decision.Initialized = true;
+                decision.StateChanged = true;
+                CheckExpiring(state, activeItems, activeIdSet, enabled, nowUnix, decision, allowTrigger: true);
+                if (decision.Reason.Length == 0) decision.Reason = "baseline";
+                SaveIfConfigured();
+                return decision;
+            }
+
+            decision.Initialized = true;
+            if (info.hasDetails)
+            {
+                int newCount = 0;
+                foreach (string id in activeIdSet)
+                    if (!state.KnownIds.Contains(id)) newCount++;
+                if (!state.KnownIds.SetEquals(activeIdSet) || state.LastKnownCount != info.availableCount)
+                {
+                    state.KnownIds.Clear();
+                    foreach (string id in activeIdSet) state.KnownIds.Add(id);
+                    state.LastKnownCount = info.availableCount;
+                    decision.StateChanged = true;
+                }
+                if (newCount > 0 && enabled)
+                {
+                    decision.NewCreditTriggered = true;
+                    decision.NewCreditCount = newCount;
+                    decision.Reason = "new_credit";
+                }
+                CheckExpiring(state, activeItems, activeIdSet, enabled, nowUnix, decision, allowTrigger: !decision.NewCreditTriggered);
+            }
+            else
+            {
+                if (info.availableCount == 0 && (state.LastKnownCount != 0 || state.KnownIds.Count > 0 || state.ExpiringNotifiedIds.Count > 0))
+                {
+                    state.LastKnownCount = 0;
+                    state.KnownIds.Clear();
+                    state.ExpiringNotifiedIds.Clear();
+                    decision.StateChanged = true;
+                }
+                else if (allowCountOnly && info.availableCount > state.LastKnownCount)
+                {
+                    int diff = info.availableCount - state.LastKnownCount;
+                    state.LastKnownCount = info.availableCount;
+                    decision.StateChanged = true;
+                    if (enabled)
+                    {
+                        decision.NewCreditTriggered = true;
+                        decision.NewCreditCount = diff;
+                        decision.Reason = "new_credit_count";
+                    }
+                }
+            }
+
+            if (decision.Reason.Length == 0) decision.Reason = enabled ? "unchanged" : "disabled";
+            if (decision.StateChanged) SaveIfConfigured();
+            return decision;
+        }
+
+        private static void CheckExpiring(ResetCreditSlotState state, List<ResetCreditItem> activeItems, HashSet<string> activeIdSet,
+            bool enabled, double nowUnix, ResetCreditDecision decision, bool allowTrigger)
+        {
+            var stale = new List<string>();
+            foreach (string oldId in state.ExpiringNotifiedIds)
+                if (!activeIdSet.Contains(oldId)) stale.Add(oldId);
+            if (stale.Count > 0)
+            {
+                foreach (string id in stale) state.ExpiringNotifiedIds.Remove(id);
+                decision.StateChanged = true;
+            }
+            if (!enabled) return;
+
+            int expCount = 0;
+            double expSoonest = 0.0;
+            foreach (ResetCreditItem item in activeItems)
+            {
+                double left = item.expiresAt - nowUnix;
+                if (item.expiresAt <= 0.0 || left <= 0.0 || left > ExpiringSoonSeconds) continue;
+                if (state.ExpiringNotifiedIds.Add(item.id))
+                {
+                    decision.StateChanged = true;
+                    expCount++;
+                    if (expSoonest <= 0.0 || item.expiresAt < expSoonest) expSoonest = item.expiresAt;
+                }
+            }
+            if (allowTrigger && expCount > 0)
+            {
+                decision.ExpiringTriggered = true;
+                decision.ExpiringCount = expCount;
+                decision.ExpiringSoonestAt = expSoonest;
+                decision.Reason = "expiring_soon";
+            }
+        }
+
+        internal static ResetCreditTracker Load(string root)
+        {
+            var tracker = new ResetCreditTracker { storageRoot = root };
+            if (string.IsNullOrEmpty(root)) return tracker;
+            try
+            {
+                string path = Path.Combine(root, "reset-credits-state.txt");
+                if (!File.Exists(path)) return tracker;
+                foreach (string raw in File.ReadAllLines(path, Encoding.UTF8))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    string[] parts = line.Split('|');
+                    if (parts.Length < 5) continue;
+                    int count;
+                    if (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out count)) count = 0;
+                    var state = new ResetCreditSlotState
+                    {
+                        Initialized = parts[1] == "1",
+                        LastKnownCount = Math.Max(0, count)
+                    };
+                    AddIds(state.KnownIds, parts[3]);
+                    AddIds(state.ExpiringNotifiedIds, parts[4]);
+                    tracker.states[SafeSlot(parts[0])] = state;
+                }
+            }
+            catch { }
+            return tracker;
+        }
+
+        internal bool Save(string root)
+        {
+            if (string.IsNullOrEmpty(root)) return false;
+            string temp = null;
+            try
+            {
+                Directory.CreateDirectory(root);
+                var sb = new StringBuilder();
+                var keys = new List<string>(states.Keys);
+                keys.Sort(StringComparer.Ordinal);
+                foreach (string key in keys)
+                {
+                    ResetCreditSlotState s = states[key];
+                    sb.Append(key).Append('|')
+                      .Append(s.Initialized ? "1" : "0").Append('|')
+                      .Append(s.LastKnownCount.ToString(CultureInfo.InvariantCulture)).Append('|')
+                      .Append(JoinIds(s.KnownIds)).Append('|')
+                      .Append(JoinIds(s.ExpiringNotifiedIds)).AppendLine();
+                }
+                string target = Path.Combine(root, "reset-credits-state.txt");
+                temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(temp, sb.ToString(), new UTF8Encoding(false));
+                if (File.Exists(target)) File.Replace(temp, target, null);
+                else File.Move(temp, target);
+                return true;
+            }
+            catch { return false; }
+            finally
+            {
+                if (temp != null && File.Exists(temp)) try { File.Delete(temp); } catch { }
+            }
+        }
+
+        private void SaveIfConfigured()
+        {
+            if (!string.IsNullOrEmpty(storageRoot)) Save(storageRoot);
+        }
+
+        private static string SafeSlot(string slot) { return string.IsNullOrEmpty(slot) ? "single" : slot; }
+        private static string SanitizeId(string id) { return string.IsNullOrEmpty(id) ? "" : id.Replace("|", "_").Replace(",", "_").Replace("\r", "").Replace("\n", ""); }
+        private static string JoinIds(HashSet<string> ids)
+        {
+            if (ids == null || ids.Count == 0) return "";
+            var list = new List<string>();
+            foreach (string id in ids) { string s = SanitizeId(id); if (s.Length > 0) list.Add(s); }
+            list.Sort(StringComparer.Ordinal);
+            return string.Join(",", list.ToArray());
+        }
+        private static void AddIds(HashSet<string> dest, string csv)
+        {
+            if (string.IsNullOrEmpty(csv)) return;
+            foreach (string raw in csv.Split(',')) { string id = raw.Trim(); if (id.Length > 0) dest.Add(id); }
+        }
+    }
 }

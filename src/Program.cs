@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.58.0")]
+[assembly: AssemblyVersion("1.9.61.0")]
 
 namespace QuotaTrayApp
 {
@@ -499,6 +499,21 @@ namespace QuotaTrayApp
         public double resetsAt;
     }
 
+    internal class ResetCreditItem
+    {
+        public string id;
+        public double grantedAt;
+        public double expiresAt;
+        public string status;
+    }
+
+    internal class ResetCreditsInfo
+    {
+        public int availableCount;
+        public bool hasDetails;
+        public ResetCreditItem[] credits;
+    }
+
     internal class QuotaResult
     {
         public bool ok;
@@ -733,6 +748,19 @@ namespace QuotaTrayApp
             En["{0} 天额度"] = "{0}-day quota";
             En["剩余"] = "Remaining";
             En["暂无"] = "No data";
+            En["（{0}月{1}日 {2}）"] = "({0}/{1} {2})";
+            En["（{0}年{1}月{2}日 {3}）"] = "({0}/{1}/{2} {3})";
+            En["{0}月{1}日 {2}"] = "{0}/{1} {2}";
+            En["{0}年{1}月{2}日 {3}"] = "{0}/{1}/{2} {3}";
+            En["重置券提醒"] = "Reset pass alerts";
+            En["官方发放新重置券或临近过期时提醒，也可在下方按账号单独调整。"] = "Alerts when a new reset pass arrives or nears expiry; you can still toggle each account below.";
+            En["收到新重置券（共 {0} 张）"] = "New reset pass ({0} available)";
+            En["重置券即将过期（共 {0} 张）"] = "Reset pass expiring soon ({0} left)";
+            En["{0} 过期"] = "Expires {0}";
+            En["{0}后过期"] = "Expires in {0}";
+            En["可在 Codex 中手动使用"] = "Redeem manually in Codex";
+            En["重置券：{0} 张"] = "Reset passes: {0}";
+            En["重置券：{0} 张 · 最近 {1} 过期"] = "Reset passes: {0} · next expires {1}";
             En["剩余 {0}%"] = "{0}% left";
             En["已耗尽"] = "used up";
             En["恢复：{0}"] = "Resets: {0}";
@@ -754,6 +782,19 @@ namespace QuotaTrayApp
             Ja["{0} 天额度"] = "{0}日の残量";
             Ja["剩余"] = "残量";
             Ja["暂无"] = "データなし";
+            Ja["（{0}月{1}日 {2}）"] = "（{0}月{1}日 {2}）";
+            Ja["（{0}年{1}月{2}日 {3}）"] = "（{0}年{1}月{2}日 {3}）";
+            Ja["{0}月{1}日 {2}"] = "{0}月{1}日 {2}";
+            Ja["{0}年{1}月{2}日 {3}"] = "{0}年{1}月{2}日 {3}";
+            Ja["重置券提醒"] = "リセット券アラート";
+            Ja["官方发放新重置券或临近过期时提醒，也可在下方按账号单独调整。"] = "新しいリセット券の付与や期限間近を通知します。下のアカウント別に個別の変更もできます。";
+            Ja["收到新重置券（共 {0} 张）"] = "新しいリセット券（計{0}枚）";
+            Ja["重置券即将过期（共 {0} 张）"] = "リセット券の期限間近（残り{0}枚）";
+            Ja["{0} 过期"] = "{0} まで";
+            Ja["{0}后过期"] = "あと{0}で失効";
+            Ja["可在 Codex 中手动使用"] = "Codex から手動で使用できます";
+            Ja["重置券：{0} 张"] = "リセット券：{0}枚";
+            Ja["重置券：{0} 张 · 最近 {1} 过期"] = "リセット券：{0}枚・最短 {1} まで";
             Ja["剩余 {0}%"] = "残り{0}%";
             Ja["已耗尽"] = "使い切り";
             Ja["恢复：{0}"] = "リセット: {0}";
@@ -947,6 +988,7 @@ namespace QuotaTrayApp
         internal const int DefaultNotifyVolume = 100;
         public int notifyVolume = DefaultNotifyVolume;
         public bool dailyPaceDefault = true;
+        public bool resetCreditDefault = true;
         public bool autoUpdate = true;
         public string theme = "auto";
         public string language = "auto";   // auto / zh / ja / en
@@ -966,8 +1008,37 @@ namespace QuotaTrayApp
         }
         private readonly System.Collections.Generic.Dictionary<string, int> accountLevels = new System.Collections.Generic.Dictionary<string, int>();
         private readonly System.Collections.Generic.Dictionary<string, bool> accountDailyPace = new System.Collections.Generic.Dictionary<string, bool>();
+        private readonly System.Collections.Generic.Dictionary<string, bool> accountResetCredit = new System.Collections.Generic.Dictionary<string, bool>();
         internal bool HasAccountLevel(string slot) { return accountLevels.ContainsKey(slot); }
         internal bool HasAccountDailyPace(string slot) { return slot != null && accountDailyPace.ContainsKey(slot); }
+        internal bool HasAccountResetCredit(string slot) { return slot != null && accountResetCredit.ContainsKey(slot); }
+        internal bool ResetCreditFor(string slot)
+        {
+            bool value;
+            return slot != null && accountResetCredit.TryGetValue(slot, out value) ? value : resetCreditDefault;
+        }
+        internal bool SetAccountResetCredit(string root, string slot, bool enabled)
+        {
+            if (!DisplayPolicy.ValidSlot(slot)) return false;
+            bool hadPrevious = accountResetCredit.ContainsKey(slot);
+            bool previous = hadPrevious && accountResetCredit[slot];
+            accountResetCredit[slot] = enabled;
+            if (Save(root)) return true;
+            if (hadPrevious) accountResetCredit[slot] = previous;
+            else accountResetCredit.Remove(slot);
+            return false;
+        }
+        internal bool ApplyGlobalResetCredit(string root, bool enabled)
+        {
+            bool previousDefault = resetCreditDefault;
+            var previousOverrides = new System.Collections.Generic.Dictionary<string, bool>(accountResetCredit);
+            resetCreditDefault = enabled;
+            accountResetCredit.Clear();
+            if (Save(root)) return true;
+            resetCreditDefault = previousDefault;
+            foreach (var previous in previousOverrides) accountResetCredit.Add(previous.Key, previous.Value);
+            return false;
+        }
         internal bool DailyPaceFor(string slot)
         {
             bool value;
@@ -1076,6 +1147,7 @@ namespace QuotaTrayApp
                     else if (k == "codexlookupattempted") s.codexLookupAttempted = v == "true";
                     else if (k == "notifysound" && (v == "true" || v == "false")) s.notifySound = v == "true";
                     else if (k == "dailypace" && (v == "true" || v == "false")) s.dailyPaceDefault = v == "true";
+                    else if (k == "resetcredit" && (v == "true" || v == "false")) s.resetCreditDefault = v == "true";
                     else if (k == "autoupdate" && (v == "true" || v == "false")) s.autoUpdate = v == "true";
                     else if (k == "notifyvolume")
                     {
@@ -1084,6 +1156,8 @@ namespace QuotaTrayApp
                     }
                     else if (k.StartsWith("dailypace.") && DisplayPolicy.ValidSlot(k.Substring(10)) && (v == "true" || v == "false"))
                         s.accountDailyPace[k.Substring(10)] = v == "true";
+                    else if (k.StartsWith("resetcredit.") && DisplayPolicy.ValidSlot(k.Substring(12)) && (v == "true" || v == "false"))
+                        s.accountResetCredit[k.Substring(12)] = v == "true";
                     else if (k.StartsWith("notify.") && DisplayPolicy.ValidSlot(k.Substring(7))) s.accountLevels[k.Substring(7)] = ParseLevel(v);
                     else if (k == "language")
                     {
@@ -1128,6 +1202,7 @@ namespace QuotaTrayApp
                             + "notifySound=" + (notifySound ? "true" : "false") + Environment.NewLine
                             + "notifyVolume=" + notifyVolume + Environment.NewLine
                             + "dailyPace=" + (dailyPaceDefault ? "true" : "false") + Environment.NewLine
+                            + "resetCredit=" + (resetCreditDefault ? "true" : "false") + Environment.NewLine
                             + "autoUpdate=" + (autoUpdate ? "true" : "false") + Environment.NewLine
                             + "# 语言：auto / zh / ja / en" + Environment.NewLine
                             + "language=" + language + Environment.NewLine
@@ -1140,6 +1215,8 @@ namespace QuotaTrayApp
                     if (accountLevels.ContainsKey(slot)) text += "notify." + slot + "=" + LevelKey(accountLevels[slot]) + Environment.NewLine;
                 foreach (string slot in new string[] { "a", "b", "c", "d", "e" })
                     if (accountDailyPace.ContainsKey(slot)) text += "dailyPace." + slot + "=" + (accountDailyPace[slot] ? "true" : "false") + Environment.NewLine;
+                foreach (string slot in new string[] { "a", "b", "c", "d", "e" })
+                    if (accountResetCredit.ContainsKey(slot)) text += "resetCredit." + slot + "=" + (accountResetCredit[slot] ? "true" : "false") + Environment.NewLine;
                 string target = Path.Combine(root, "settings.txt");
                 temp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(temp, text, new UTF8Encoding(false));
@@ -1192,6 +1269,42 @@ namespace QuotaTrayApp
         internal static string DailyPaceBody()
         {
             return L.T("已达今日推荐用量");
+        }
+
+        internal static string ResetCreditExpiryClock(double unixSec)
+        {
+            if (Double.IsNaN(unixSec) || Double.IsInfinity(unixSec) || unixSec <= 0 || unixSec > 253402300799) return "";
+            DateTime at = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixSec).ToLocalTime();
+            string clock = at.ToString("HH:mm");
+            if (at.Year != DateTime.Now.Year) return L.F("{0}年{1}月{2}日 {3}", at.Year, at.Month, at.Day, clock);
+            return L.F("{0}月{1}日 {2}", at.Month, at.Day, clock);
+        }
+
+        internal static string ResetCreditCountdown(double unixSec)
+        {
+            if (Double.IsNaN(unixSec) || Double.IsInfinity(unixSec) || unixSec <= 0 || unixSec > 253402300799) return "";
+            DateTime at = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixSec);
+            TimeSpan left = at - DateTime.UtcNow;
+            if (left.TotalMinutes < 1) return L.F("{0} 分钟", 1);
+            if (left.TotalDays >= 1) return L.F("{0} 天 {1} 小时", (int)left.TotalDays, left.Hours);
+            if (left.TotalHours >= 1) return L.F("{0} 小时 {1} 分", (int)left.TotalHours, left.Minutes);
+            return L.F("{0} 分钟", Math.Max(1, (int)Math.Ceiling(left.TotalMinutes)));
+        }
+
+        internal static string ResetCreditNewBody(int count, double soonestExpiresAt)
+        {
+            string line1 = L.F("收到新重置券（共 {0} 张）", Math.Max(1, count));
+            string clock = ResetCreditExpiryClock(soonestExpiresAt);
+            string line2 = String.IsNullOrEmpty(clock) ? L.T("可在 Codex 中手动使用") : L.F("{0} 过期", clock);
+            return line1 + "\n" + line2;
+        }
+
+        internal static string ResetCreditExpiringBody(int count, double soonestExpiresAt)
+        {
+            string line1 = L.F("重置券即将过期（共 {0} 张）", Math.Max(1, count));
+            string left = ResetCreditCountdown(soonestExpiresAt);
+            string line2 = String.IsNullOrEmpty(left) ? L.T("可在 Codex 中手动使用") : L.F("{0}后过期", left);
+            return line1 + "\n" + line2;
         }
     }
 
@@ -2539,6 +2652,7 @@ namespace QuotaTrayApp
                     Language = settings.language, Theme = settings.theme, DefaultNotifyLevel = settings.notifyLevel,
                     NotifySound = settings.notifySound, NotifyVolume = settings.notifyVolume,
                     DefaultDailyPace = settings.dailyPaceDefault,
+                    DefaultResetCredit = settings.resetCreditDefault,
                     AutoUpdate = settings.autoUpdate, AutoStart = IsAutoStartEnabled() };
             };
             actions.ConnectAccounts = delegate { ShowAccountConnections(); };
@@ -2559,6 +2673,14 @@ namespace QuotaTrayApp
             actions.SetAccountDailyPace = delegate(string slot, bool enabled)
             {
                 return settings.SetAccountDailyPace(root, slot, enabled);
+            };
+            actions.ApplyGlobalResetCredit = delegate(bool enabled)
+            {
+                return settings.ApplyGlobalResetCredit(root, enabled);
+            };
+            actions.SetAccountResetCredit = delegate(string slot, bool enabled)
+            {
+                return settings.SetAccountResetCredit(root, slot, enabled);
             };
             actions.SetNotifySound = delegate(bool enabled)
             {
@@ -4014,12 +4136,24 @@ namespace QuotaTrayApp
 
             string body, sound;
             bool dailyPaceDemo = kind == "daily-pace";
+            bool resetCreditNew = kind == "reset-credit-new";
+            bool resetCreditExpiring = kind == "reset-credit-expiring";
             bool restored = kind == "5h-restored" || kind == "7d-restored";
             bool compactToast = restored || dailyPaceDemo;
             bool exhausted = kind == "5h-empty" || kind == "7d-empty";
             bool weekly = kind == "7d-empty" || kind == "7d-25" || kind == "7d-restored";
             string window = weekly ? L.F("{0} 天", 7) : L.T("5 小时");
-            if (dailyPaceDemo)
+            if (resetCreditNew)
+            {
+                body = NotifyRules.ResetCreditNewBody(2, DateTimeOffset.UtcNow.AddDays(18).ToUnixTimeSeconds());
+                sound = RecoverySound;
+            }
+            else if (resetCreditExpiring)
+            {
+                body = NotifyRules.ResetCreditExpiringBody(1, DateTimeOffset.UtcNow.AddHours(12).ToUnixTimeSeconds());
+                sound = "notify.wav";
+            }
+            else if (dailyPaceDemo)
             {
                 body = NotifyRules.DailyPaceBody();
                 sound = NoSound;

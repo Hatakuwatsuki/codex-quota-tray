@@ -180,6 +180,7 @@ namespace QuotaTrayApp
         public ConnectedSlot[] accounts;
         public WindowInfo primary;
         public WindowInfo secondary;
+        public ResetCreditsInfo resetCredits;
         public double at;
     }
 

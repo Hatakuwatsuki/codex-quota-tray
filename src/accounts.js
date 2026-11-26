@@ -276,6 +276,28 @@ function win(w) {
       (w.resetsAt != null && !Number.isSafeInteger(w.resetsAt))) fail('invalid_response');
   return {used:w.usedPercent,windowMins:w.windowDurationMins == null ? null : w.windowDurationMins,resetsAt:w.resetsAt == null ? null : w.resetsAt};
 }
+function safeUnix(v) {
+  return Number.isSafeInteger(v) && v >= 0 && v <= 253402300799 ? v : 0;
+}
+function parseResetCredits(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const availableCount = Number.isSafeInteger(raw.availableCount) && raw.availableCount >= 0 ? raw.availableCount : 0;
+  const hasDetails = Array.isArray(raw.credits);
+  const credits = [];
+  if (hasDetails) {
+    for (const c of raw.credits) {
+      if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !c.id) continue;
+      credits.push({
+        id: String(c.id).slice(0, 128),
+        grantedAt: safeUnix(c.grantedAt),
+        expiresAt: safeUnix(c.expiresAt),
+        status: typeof c.status === 'string' ? c.status : 'unknown'
+      });
+      if (credits.length >= 50) break;
+    }
+  }
+  return { availableCount, hasDetails, credits };
+}
 function validateUrl(s) {
   if (typeof s !== 'string' || s.length > 8192) fail('invalid_url');
   let u; try { u = new URL(s); } catch (_) { fail('invalid_url'); }
@@ -409,14 +431,27 @@ async function run(command,slot,options = {}) {
       state.accounts[slot] = confirmed; saveState(root,state);
       emit({event:'result',ok:true,slot,identity:publicIdentity(before)}); return;
     }
-    const limits = await rpc.call('account/rateLimits/read',{});
+    const skipDetails = process.env.CODEX_QUOTA_CREDIT_DETAILS === '0';
+    let limits;
+    try {
+      limits = await rpc.call('account/rateLimits/read', skipDetails ? { excludeResetCreditDetails: true } : {});
+    } catch (err) {
+      if (skipDetails && err instanceof SafeError && err.code === 'server_error') {
+        limits = await rpc.call('account/rateLimits/read', {});
+      } else {
+        throw err;
+      }
+    }
     if (limits.accountId != null && limits.accountId !== before.accountId) fail('identity_mismatch');
     const primary = win(limits.rateLimits && limits.rateLimits.primary), secondary = win(limits.rateLimits && limits.rateLimits.secondary);
     if (!limits.rateLimits || typeof limits.rateLimits !== 'object' || (!primary && !secondary)) fail('invalid_response');
+    const resetCredits = parseResetCredits(limits.rateLimitResetCredits);
     const after = await identity(rpc);
     checkPlaintext();
     if (!same(before,after) || !same(after,entry.identity)) fail('identity_mismatch');
-    emit({event:'result',ok:true,slot,identity:publicIdentity(after),primary,secondary,at:Date.now()});
+    const out = {event:'result',ok:true,slot,identity:publicIdentity(after),primary,secondary,at:Date.now()};
+    if (resetCredits) out.resetCredits = resetCredits;
+    emit(out);
   } catch(e) {
     const code = e instanceof SafeError && ERRORS[e.code] ? e.code : 'storage_error';
     const out = {event:'result',ok:false}; if (SLOTS.includes(slot)) out.slot = slot;

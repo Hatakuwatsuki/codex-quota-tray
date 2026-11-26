@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace QuotaTrayApp
 {
-    internal sealed class SettingsAccount { internal string Slot, Label, Plan, EmailMask, Quota; internal int DisplayNumber; internal WindowInfo Primary, Secondary; internal bool Failed; internal bool Visible; internal int NotifyLevel; internal bool DailyPace = true; }
+    internal sealed class SettingsAccount { internal string Slot, Label, Plan, EmailMask, Quota; internal int DisplayNumber; internal WindowInfo Primary, Secondary; internal ResetCreditsInfo ResetCredits; internal bool Failed; internal bool Visible; internal int NotifyLevel; internal bool DailyPace = true; internal bool ResetCredit = true; }
     internal sealed class SettingsSnapshot
     {
         internal List<SettingsAccount> Accounts;
@@ -19,6 +19,7 @@ namespace QuotaTrayApp
         internal bool NotifySound = true;
         internal int NotifyVolume = AppSettings.DefaultNotifyVolume;
         internal bool DefaultDailyPace = true;
+        internal bool DefaultResetCredit = true;
         internal bool AutoUpdate = true;
         internal bool AutoStart, AccountsLoading, CodexMissing;
     }
@@ -31,6 +32,8 @@ namespace QuotaTrayApp
         internal Func<int, bool> ApplyGlobalLevel;
         internal Func<bool, bool> ApplyGlobalDailyPace;
         internal Func<string, bool, bool> SetAccountDailyPace;
+        internal Func<bool, bool> ApplyGlobalResetCredit;
+        internal Func<string, bool, bool> SetAccountResetCredit;
         internal Func<bool, bool> SetNotifySound;
         internal Func<int, bool> SetNotifyVolume;
         internal Action<int> TestNotifyVolume;
@@ -50,8 +53,12 @@ namespace QuotaTrayApp
         private readonly System.Windows.Forms.Timer scrollTimer = new System.Windows.Forms.Timer { Interval = 15 };
         private readonly Dictionary<Control, int> baseChildTops = new Dictionary<Control, int>();
         private double scrollTarget, scrollCurrent, overscroll;
-        private int maxScroll, totalContentHeight;
+        private int maxScroll, totalContentHeight, lastAppliedOffset = int.MinValue;
         private bool applyingScroll;
+        [DllImport("user32.dll")] private static extern IntPtr BeginDeferWindowPos(int numWindows);
+        [DllImport("user32.dll")] private static extern IntPtr DeferWindowPos(IntPtr winPosInfo, IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] private static extern bool EndDeferWindowPos(IntPtr winPosInfo);
+        [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hwnd, IntPtr rectUpdate, IntPtr regionUpdate, uint flags);
         private readonly RadioButton[] navigation = new RadioButton[4];
         private bool updatingNavigation, resizingCards;
         private readonly System.Windows.Forms.Timer themeTimer = new System.Windows.Forms.Timer();
@@ -83,6 +90,10 @@ namespace QuotaTrayApp
         private int ShortSelectWidth { get { return S(184); } }
         private int LongSelectWidth { get { return S(252); } }
         private int CardPaddingSize { get { return CardInset; } }
+        private const string DailyPaceHelpKey = "按 7 天剩余额度与距重置天数动态提醒今日建议上限；也可在下方按账号单独开关。";
+        private const string DailyPaceTipKey = "按 7 天剩余额度与距重置天数动态计算每日建议上限，防止提前用光。\n开启后：当日达到推荐用量时静默提醒一次（每天每账号最多一次；已耗尽或最后 24 小时不提醒）。\n关闭后：不再弹出每日推荐用量提示。";
+        private const string ResetCreditHelpKey = "在「账号」页查看现有重置券，新发券或临近过期时提醒；也可在下方按账号单独开关。";
+        private const string ResetCreditTipKey = "开启后：在设置「账号」页显示可用重置券张数与最近过期时间；官方发放新重置券或距离过期不足 24 小时时弹窗提醒。\n关闭后：不再弹出新券与临期提醒。";
         private static readonly string[] LevelTips = {
             "关闭额度提醒。",
             "5小时：剩25%、10%提醒；7天：剩15%、5%提醒。",
@@ -146,7 +157,19 @@ namespace QuotaTrayApp
             { "应用后统一已绑定账号的档位，新绑定的账号也默认使用此档位。", new string[] { "適用すると連携済みのアカウントが同じレベルになり、新規アカウントにも適用されます。", "Apply sets this level for all bound accounts and makes it the default for newly bound accounts." } },
             { "默认提醒档位", new string[] { "既定の通知レベル", "Default alert level" } },
             { "推荐用量提醒", new string[] { "推奨使用量アラート", "Recommended usage alert" } },
-            { "默认对所有账号开启或关闭，也可在下方按账号单独调整。", new string[] { "すべてのアカウントの既定値にします。下のアカウント別に個別の変更もできます。", "Sets the default for all accounts; you can still toggle each account below." } },
+            { DailyPaceHelpKey, new string[] {
+                "7日間の残量とリセットまでの日数から1日の目安を通知します。下のアカウント別に個別の変更もできます。",
+                "Dynamically alerts on a suggested daily budget from your 7-day quota; toggle per account below." } },
+            { DailyPaceTipKey, new string[] {
+                "7日間の残量とリセットまでの日数から1日の目安を動的に計算し、使いすぎを防ぎます。\nオン時：目安に達すると無音で1日1回通知します（残量0%や残り24時間以内は通知しません）。\nオフ時：推奨使用量の通知は表示されません。",
+                "Dynamically estimates a daily budget from your remaining 7-day quota and days until reset so you do not run out early.\nWhen on: shows one silent alert per account per day once reached (skipped at 0% or in the final 24h).\nWhen off: no daily pace alerts are shown." } },
+            { "重置券提醒", new string[] { "リセット券アラート", "Reset pass alerts" } },
+            { ResetCreditHelpKey, new string[] {
+                "「アカウント」画面でリセット券を確認し、新規付与や期限間近を通知します。下のアカウント別に個別の変更もできます。",
+                "Shows available reset passes on Accounts and alerts on new passes or expiry; toggle per account below." } },
+            { ResetCreditTipKey, new string[] {
+                "オン時：「アカウント」画面に枚数と最短期限を表示し、新規付与時や期限24時間以内に通知します。\nオフ時：新規付与・期限間近の通知は表示されません。",
+                "When on: shows pass count and earliest expiry on the Accounts page, and alerts when a new pass arrives or expires within 24h.\nWhen off: no new-pass or expiry alerts are shown." } },
             { "播放提醒声音", new string[] { "通知音を鳴らす", "Play alert sounds" } },
             { "提醒音量", new string[] { "通知音量", "Alert volume" } },
             { "试听", new string[] { "試聴", "Test" } },
@@ -184,6 +207,10 @@ namespace QuotaTrayApp
         {
             if (actions == null || actions.Read == null) throw new ArgumentNullException("actions");
             this.actions = actions;
+            tips.AutoPopDelay = 12000;
+            tips.InitialDelay = 350;
+            tips.ReshowDelay = 150;
+            tips.ShowAlways = true;
             Text = "额度显示器设置";
             TitlePrimary = "额度显示器"; TitleSecondary = "设置";
             ShowIcon = true;
@@ -232,12 +259,12 @@ namespace QuotaTrayApp
             scrollBar = new UiScrollBar();
             scrollBar.Name = "content-scrollbar";
             scrollBar.Visible = false;
-            scrollBar.Scrolled += delegate(int value)
+            scrollBar.Scrolled += delegate(double value)
             {
                 scrollTarget = scrollCurrent = Math.Max(0, Math.Min(maxScroll, value));
                 overscroll = 0;
                 scrollTimer.Stop();
-                ApplyCustomScroll();
+                ApplyCustomScroll(true);
             };
             scrollBar.WheelDelta += delegate(int delta) { HandleWheelDelta(delta); };
             scrollTimer.Tick += delegate { StepScrollAnimation(); };
@@ -372,6 +399,7 @@ namespace QuotaTrayApp
             content.SuspendLayout();
             while (content.Controls.Count > 0) content.Controls[0].Dispose();
             baseChildTops.Clear();
+            lastAppliedOffset = int.MinValue;
             checkUpdateButton = null; updateMessage = null;
             displayToggles.Clear(); desktopSlots.Clear(); desktop = null; error = null;
             updatingNavigation = true;
@@ -487,6 +515,7 @@ namespace QuotaTrayApp
         {
             if (content == null || scrollBar == null || applyingScroll || resizingCards) return;
             baseChildTops.Clear();
+            lastAppliedOffset = int.MinValue;
             int bottom = content.Padding.Top;
             foreach (Control child in content.Controls)
             {
@@ -499,25 +528,56 @@ namespace QuotaTrayApp
             scrollTarget = Math.Max(0, Math.Min(maxScroll, scrollTarget));
             scrollCurrent = Math.Max(0, Math.Min(maxScroll, scrollCurrent));
             if (maxScroll == 0) overscroll = Math.Max(-S(36), Math.Min(S(36), overscroll));
-            int barWidth = S(10);
-            scrollBar.SetBounds(Math.Max(0, ClientSize.Width - barWidth - S(3)),
+            int barWidth = S(12);
+            scrollBar.SetBounds(Math.Max(0, ClientSize.Width - barWidth - S(4)),
                 ScaledCaptionHeight + S(4), barWidth, Math.Max(1, ClientSize.Height - ScaledCaptionHeight - S(8)));
             scrollBar.BringToFront();
             ApplyCustomScroll();
         }
-        private void ApplyCustomScroll()
+        private bool MoveScrollChildren(int offset)
+        {
+            List<Control> targets = new List<Control>();
+            List<int> tops = new List<int>();
+            bool allHandles = content.IsHandleCreated;
+            foreach (KeyValuePair<Control, int> entry in baseChildTops)
+            {
+                Control child = entry.Key;
+                if (child == null || child.IsDisposed) continue;
+                int targetTop = entry.Value - offset;
+                if (child.Top == targetTop) continue;
+                targets.Add(child);
+                tops.Add(targetTop);
+                if (!child.IsHandleCreated) allHandles = false;
+            }
+            if (targets.Count == 0) return false;
+            if (allHandles)
+            {
+                const uint flags = 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0100; // SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS
+                IntPtr hdwp = BeginDeferWindowPos(targets.Count);
+                if (hdwp != IntPtr.Zero)
+                {
+                    for (int i = 0; i < targets.Count && hdwp != IntPtr.Zero; i++)
+                        hdwp = DeferWindowPos(hdwp, targets[i].Handle, IntPtr.Zero, targets[i].Left, tops[i], 0, 0, flags);
+                    if (hdwp != IntPtr.Zero && EndDeferWindowPos(hdwp)) return true;
+                }
+            }
+            for (int i = 0; i < targets.Count; i++) targets[i].Top = tops[i];
+            return true;
+        }
+        private void ApplyCustomScroll(bool immediatePaint = false)
         {
             if (content == null || applyingScroll) return;
             applyingScroll = true;
             content.SuspendLayout();
+            bool moved = false;
             try
             {
                 int offset = (int)Math.Round(scrollCurrent + overscroll);
                 content.SuppressLayout = true;
-                foreach (KeyValuePair<Control, int> entry in baseChildTops)
+                if (offset != lastAppliedOffset)
                 {
-                    if (entry.Key != null && !entry.Key.IsDisposed)
-                        entry.Key.Top = entry.Value - offset;
+                    moved = MoveScrollChildren(offset);
+                    lastAppliedOffset = offset;
                 }
                 int viewHeight = Math.Max(1, content.ClientSize.Height);
                 bool canScroll = totalContentHeight > viewHeight + 1;
@@ -526,13 +586,25 @@ namespace QuotaTrayApp
                     scrollBar.Visible = canScroll;
                     if (canScroll) scrollBar.UpdateMetrics(viewHeight, totalContentHeight, scrollCurrent, overscroll, maxScroll);
                 }
-                if (UiTheme.IsGlass(content)) content.Invalidate();
             }
             finally
             {
                 content.SuppressLayout = false;
                 content.ResumeLayout(false);
                 applyingScroll = false;
+            }
+            if (moved && content.IsHandleCreated && content.Visible && Visible)
+            {
+                if (immediatePaint)
+                {
+                    const uint flags = 0x0001 | 0x0004 | 0x0080 | 0x0100; // RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                    RedrawWindow(content.Handle, IntPtr.Zero, IntPtr.Zero, flags);
+                    if (scrollBar != null && scrollBar.Visible && scrollBar.IsHandleCreated) scrollBar.Update();
+                }
+                else
+                {
+                    content.Invalidate(true);
+                }
             }
         }
         private void StepScrollAnimation()
@@ -544,13 +616,13 @@ namespace QuotaTrayApp
             if (Math.Abs(overscroll) < 0.35) overscroll = 0;
             else overscroll *= 0.80;
 
-            ApplyCustomScroll();
+            ApplyCustomScroll(true);
             if (Math.Abs(scrollTarget - scrollCurrent) < 0.35 && Math.Abs(overscroll) < 0.35)
             {
                 scrollCurrent = scrollTarget;
                 overscroll = 0;
                 scrollTimer.Stop();
-                ApplyCustomScroll();
+                ApplyCustomScroll(true);
             }
         }
         internal void HandleWheelDelta(int delta)
@@ -578,13 +650,14 @@ namespace QuotaTrayApp
                 scrollTarget = desired;
             }
             if (IsHandleCreated && !scrollTimer.Enabled) scrollTimer.Start();
-            ApplyCustomScroll();
+            ApplyCustomScroll(true);
         }
         internal void SimulateWheelForTest(int delta) { HandleWheelDelta(delta); }
         internal void StepScrollForTest(int steps = 1) { for (int i = 0; i < steps; i++) StepScrollAnimation(); }
         internal int ScrollMax { get { return maxScroll; } }
         internal double OverscrollForTest { get { return overscroll; } }
         internal UiScrollBar ScrollBarForTest { get { return scrollBar; } }
+        internal string ToolTipForTest(Control control) { return control == null ? "" : tips.GetToolTip(control); }
         private bool IsInsideViewport(Control hit)
         {
             for (Control c = hit; c != null; c = c.Parent)
@@ -671,9 +744,9 @@ namespace QuotaTrayApp
         private Control AccountHeader(SettingsAccount account)
         {
             FlowLayoutPanel row = new UiFlowPanel(); row.Name = "account-header"; row.AutoSize = true; row.AutoSizeMode = AutoSizeMode.GrowAndShrink; row.WrapContents = false; row.Margin = new Padding(0, 0, 0, LayoutGap);
-            Label number = new UiLabel(); number.AutoSize = true; number.Text = AccountNumber(account); number.Name = "account-number"; number.Tag = account.Slot; number.Font = new Font(Font, FontStyle.Bold); number.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(number);
-            Label divider = new UiLabel(); divider.AutoSize = true; divider.Text = "|"; divider.ForeColor = UiTheme.Border; divider.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(divider);
-            Label plan = new UiLabel(); plan.AutoSize = true; plan.Text = String.IsNullOrEmpty(account.Plan) ? "" : account.Plan; plan.ForeColor = UiTheme.TextColor; plan.Font = new Font(Font, FontStyle.Bold); plan.Margin = new Padding(0, 0, 8, 0); if (!String.IsNullOrEmpty(plan.Text)) row.Controls.Add(plan);
+            Label number = new UiLabel(); number.AutoSize = true; number.Text = AccountNumber(account); number.Name = "account-number"; number.Tag = account.Slot; number.Font = new Font(Font, FontStyle.Bold); number.Margin = new Padding(0, 0, S(8), 0); row.Controls.Add(number);
+            Label divider = new UiLabel(); divider.AutoSize = true; divider.Text = "|"; divider.ForeColor = UiTheme.Border; divider.Margin = new Padding(0, 0, S(8), 0); row.Controls.Add(divider);
+            Label plan = new UiLabel(); plan.AutoSize = true; plan.Text = String.IsNullOrEmpty(account.Plan) ? "" : account.Plan; plan.ForeColor = UiTheme.TextColor; plan.Font = new Font(Font, FontStyle.Bold); plan.Margin = new Padding(0, 0, S(8), 0); if (!String.IsNullOrEmpty(plan.Text)) row.Controls.Add(plan);
             Label email = new UiLabel(); email.AutoSize = true; email.Text = account.EmailMask ?? ""; email.ForeColor = UiTheme.Muted; email.Margin = new Padding(0); if (!String.IsNullOrEmpty(email.Text)) row.Controls.Add(email);
             return row;
         }
@@ -693,6 +766,14 @@ namespace QuotaTrayApp
                 errorLine.Name = "quota-error";
                 inner.Controls.Add(errorLine);
                 FlowLayoutPanel meters = Row(); meters.Name = "meters"; inner.Controls.Add(meters);
+                Label creditLine = TextLine("", false);
+                creditLine.Name = "reset-credits-line";
+                creditLine.Visible = false;
+                creditLine.Margin = Padding.Empty;
+                Font creditFont = new Font(Font.FontFamily, 9.2f);
+                creditLine.Font = creditFont;
+                creditLine.Disposed += delegate { creditFont.Dispose(); };
+                inner.Controls.Add(creditLine);
                 accountQuotaRows[account.Slot] = meters;
                 UpdateAccountQuota(meters, account);
             }
@@ -710,6 +791,33 @@ namespace QuotaTrayApp
             bool changed = errorLine.Text != errorText;
             errorLine.Text = errorText;
             errorLine.Visible = account.Failed;
+
+            Label creditLine = row.Parent.Controls["reset-credits-line"] as Label;
+            if (creditLine != null)
+            {
+                string creditText = "";
+                bool creditWarning = false;
+                if (account.ResetCredits != null && account.ResetCredits.availableCount > 0)
+                {
+                    double soonest = ResetCreditTracker.SoonestExpiry(account.ResetCredits, DateTimeOffset.UtcNow);
+                    string clock = NotifyRules.ResetCreditExpiryClock(soonest);
+                    creditText = String.IsNullOrEmpty(clock)
+                        ? L.F("重置券：{0} 张", account.ResetCredits.availableCount)
+                        : L.F("重置券：{0} 张 · 最近 {1} 过期", account.ResetCredits.availableCount, clock);
+                    creditWarning = soonest > 0 && (soonest - DateTimeOffset.UtcNow.ToUnixTimeSeconds()) <= ResetCreditTracker.ExpiringSoonSeconds;
+                }
+                bool showCredit = creditText.Length > 0;
+                if (creditLine.Text != creditText || creditLine.Visible != showCredit)
+                {
+                    creditLine.Text = creditText;
+                    creditLine.Visible = showCredit;
+                    creditLine.Margin = showCredit ? new Padding(0, S(8), 0, 0) : Padding.Empty;
+                    changed = true;
+                }
+                creditLine.ForeColor = creditWarning
+                    ? (UiTheme.Dark ? Color.FromArgb(228, 86, 86) : Color.FromArgb(196, 46, 46))
+                    : UiTheme.Accent;
+            }
 
             WindowInfo shortWindow = null, longWindow = null;
             foreach (WindowInfo window in new[] { account.Primary, account.Secondary })
@@ -939,7 +1047,12 @@ namespace QuotaTrayApp
                 Enabled = actions.ApplyGlobalDailyPace != null,
                 Margin = new Padding(0, LayoutGap, 0, 0)
             };
-            Label dailyPaceHelp = HelpText("默认对所有账号开启或关闭，也可在下方按账号单独调整。", "global-daily-pace-help");
+            Label dailyPaceHelp = HelpText(DailyPaceHelpKey, "global-daily-pace-help");
+            string dailyPaceTip = T(DailyPaceTipKey);
+            defaultDailyPace.AccessibleDescription = dailyPaceTip;
+            dailyPaceHelp.AccessibleDescription = dailyPaceTip;
+            tips.SetToolTip(defaultDailyPace, dailyPaceTip);
+            tips.SetToolTip(dailyPaceHelp, dailyPaceTip);
             Label dailyPaceError = HelpText("保存失败，请重试。", "daily-pace-error");
             dailyPaceError.Visible = false;
             bool restoringDefaultDailyPace = false;
@@ -976,6 +1089,60 @@ namespace QuotaTrayApp
             inner.Controls.Add(defaultDailyPace);
             inner.Controls.Add(dailyPaceHelp);
             inner.Controls.Add(dailyPaceError);
+
+            var accountResetCreditSwitches = new Dictionary<string, UiCheckBox>(StringComparer.Ordinal);
+            bool updatingAccountResetCredit = false;
+            var defaultResetCredit = new UiCheckBox
+            {
+                Name = "default-reset-credit",
+                Text = T("重置券提醒"),
+                AutoSize = true,
+                Checked = snapshot.DefaultResetCredit,
+                Enabled = actions.ApplyGlobalResetCredit != null,
+                Margin = new Padding(0, LayoutGap, 0, 0)
+            };
+            Label resetCreditHelp = HelpText(ResetCreditHelpKey, "global-reset-credit-help");
+            string resetCreditTip = T(ResetCreditTipKey);
+            defaultResetCredit.AccessibleDescription = resetCreditTip;
+            resetCreditHelp.AccessibleDescription = resetCreditTip;
+            tips.SetToolTip(defaultResetCredit, resetCreditTip);
+            tips.SetToolTip(resetCreditHelp, resetCreditTip);
+            Label resetCreditError = HelpText("保存失败，请重试。", "reset-credit-error");
+            resetCreditError.Visible = false;
+            bool restoringDefaultResetCredit = false;
+            defaultResetCredit.CheckedChanged += delegate
+            {
+                if (restoringDefaultResetCredit) return;
+                bool requested = defaultResetCredit.Checked;
+                bool saved = actions.ApplyGlobalResetCredit != null && actions.ApplyGlobalResetCredit(requested);
+                if (saved)
+                {
+                    snapshot.DefaultResetCredit = requested;
+                    updatingAccountResetCredit = true;
+                    foreach (SettingsAccount account in snapshot.Accounts)
+                    {
+                        account.ResetCredit = requested;
+                        UiCheckBox accountSwitch;
+                        if (accountResetCreditSwitches.TryGetValue(account.Slot, out accountSwitch))
+                            accountSwitch.Checked = requested;
+                    }
+                    updatingAccountResetCredit = false;
+                }
+                else
+                {
+                    restoringDefaultResetCredit = true;
+                    defaultResetCredit.Checked = snapshot.DefaultResetCredit;
+                    restoringDefaultResetCredit = false;
+                }
+                if (resetCreditError.Visible == saved)
+                {
+                    resetCreditError.Visible = !saved;
+                    ResizeCards();
+                }
+            };
+            inner.Controls.Add(defaultResetCredit);
+            inner.Controls.Add(resetCreditHelp);
+            inner.Controls.Add(resetCreditError);
             if (snapshot.Accounts.Count == 0)
             {
                 inner = Inner(Card());
@@ -1005,6 +1172,8 @@ namespace QuotaTrayApp
                     Enabled = actions.SetAccountDailyPace != null,
                     Margin = new Padding(0, LayoutGap, 0, 0)
                 };
+                accountPace.AccessibleDescription = dailyPaceTip;
+                tips.SetToolTip(accountPace, dailyPaceTip);
                 Label accountPaceError = HelpText("保存失败，请重试。", "daily-pace-error-" + current.Slot);
                 accountPaceError.Visible = false;
                 accountPace.CheckedChanged += delegate
@@ -1028,6 +1197,41 @@ namespace QuotaTrayApp
                 accountPaceSwitches[current.Slot] = accountPace;
                 inner.Controls.Add(accountPace);
                 inner.Controls.Add(accountPaceError);
+
+                var accountResetCredit = new UiCheckBox
+                {
+                    Name = "reset-credit-" + current.Slot,
+                    Text = T("重置券提醒"),
+                    AutoSize = true,
+                    Checked = current.ResetCredit,
+                    Enabled = actions.SetAccountResetCredit != null,
+                    Margin = new Padding(0, LayoutGap, 0, 0)
+                };
+                accountResetCredit.AccessibleDescription = resetCreditTip;
+                tips.SetToolTip(accountResetCredit, resetCreditTip);
+                Label accountResetCreditError = HelpText("保存失败，请重试。", "reset-credit-error-" + current.Slot);
+                accountResetCreditError.Visible = false;
+                accountResetCredit.CheckedChanged += delegate
+                {
+                    if (updatingAccountResetCredit) return;
+                    bool requested = accountResetCredit.Checked;
+                    bool saved = actions.SetAccountResetCredit != null && actions.SetAccountResetCredit(current.Slot, requested);
+                    if (saved) current.ResetCredit = requested;
+                    else
+                    {
+                        updatingAccountResetCredit = true;
+                        accountResetCredit.Checked = current.ResetCredit;
+                        updatingAccountResetCredit = false;
+                    }
+                    if (accountResetCreditError.Visible == saved)
+                    {
+                        accountResetCreditError.Visible = !saved;
+                        ResizeCards();
+                    }
+                };
+                accountResetCreditSwitches[current.Slot] = accountResetCredit;
+                inner.Controls.Add(accountResetCredit);
+                inner.Controls.Add(accountResetCreditError);
             }
         }
         private FlowLayoutPanel NotifyVolumeRow(Label soundError)
@@ -2222,8 +2426,9 @@ namespace QuotaTrayApp
         private int viewport = 1, total = 1, maxScroll;
         private double current, overscroll;
         private bool hover, dragging;
-        private int dragOffset;
-        internal event Action<int> Scrolled;
+        private int dragStartY, dragTravel;
+        private double dragStartScroll;
+        internal event Action<double> Scrolled;
         internal event Action<int> WheelDelta;
 
         internal UiScrollBar()
@@ -2242,14 +2447,20 @@ namespace QuotaTrayApp
             Invalidate();
         }
 
-        internal Rectangle ThumbBounds()
+        private int BaseThumbHeight(int trackH)
         {
             float s = UiTheme.DpiScaleOf(this);
             int minH = UiTheme.S(26, s);
+            double ratio = Math.Min(1.0, (double)viewport / total);
+            return Math.Max(minH, (int)Math.Round(trackH * ratio));
+        }
+
+        internal Rectangle ThumbBounds()
+        {
+            float s = UiTheme.DpiScaleOf(this);
             int padY = UiTheme.S(2, s);
             int trackH = Math.Max(1, Height - padY * 2);
-            double ratio = Math.Min(1.0, (double)viewport / total);
-            int thumbH = Math.Max(minH, (int)Math.Round(trackH * ratio));
+            int thumbH = BaseThumbHeight(trackH);
             int squeeze = Math.Min(Math.Max(0, thumbH - UiTheme.S(16, s)), (int)Math.Round(Math.Abs(overscroll) * 0.45));
             thumbH = Math.Max(UiTheme.S(16, s), thumbH - squeeze);
             int travel = Math.Max(0, trackH - thumbH);
@@ -2262,51 +2473,76 @@ namespace QuotaTrayApp
             return new Rectangle(Math.Max(0, x), y, w, Math.Min(trackH, thumbH));
         }
 
+        private void BeginDragAt(int y, bool captureMouse)
+        {
+            if (maxScroll <= 0) return;
+            float s = UiTheme.DpiScaleOf(this);
+            int padY = UiTheme.S(2, s);
+            int trackH = Math.Max(1, Height - padY * 2);
+            int baseThumbH = BaseThumbHeight(trackH);
+            int travel = Math.Max(1, trackH - baseThumbH);
+            Rectangle thumb = ThumbBounds();
+            dragging = true;
+            dragStartY = y;
+            dragTravel = travel;
+            if (captureMouse) Capture = true;
+            if (y >= thumb.Top && y <= thumb.Bottom)
+            {
+                dragStartScroll = Math.Max(0.0, Math.Min((double)maxScroll, current));
+                if (Math.Abs(overscroll) > 0.01 && Scrolled != null) Scrolled(dragStartScroll);
+            }
+            else
+            {
+                double frac = Math.Max(0.0, Math.Min(1.0, (double)(y - padY - baseThumbH / 2.0) / travel));
+                double target = frac * maxScroll;
+                dragStartScroll = target;
+                if (Scrolled != null) Scrolled(target);
+            }
+            Invalidate();
+        }
+
+        private void MoveDragTo(int y)
+        {
+            if (!dragging || maxScroll <= 0) return;
+            double target = Math.Max(0.0, Math.Min((double)maxScroll, dragStartScroll + ((double)(y - dragStartY) / Math.Max(1, dragTravel)) * maxScroll));
+            if (Math.Abs(target - current) < 0.25 && Math.Abs(overscroll) <= 0.01) return;
+            if (Scrolled != null) Scrolled(target);
+        }
+
+        private void EndDrag(bool releaseCapture)
+        {
+            if (!dragging) return;
+            dragging = false;
+            if (releaseCapture && Capture) Capture = false;
+            Invalidate();
+        }
+
+        internal void SimulateDragStartForTest(int y) { BeginDragAt(y, false); }
+        internal void SimulateDragMoveForTest(int y) { MoveDragTo(y); }
+        internal void SimulateDragEndForTest() { EndDrag(false); }
+
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || maxScroll <= 0) return;
-            Rectangle thumb = ThumbBounds();
-            if (e.Y >= thumb.Top && e.Y <= thumb.Bottom)
-            {
-                dragging = true;
-                dragOffset = e.Y - thumb.Top;
-                Capture = true;
-                Invalidate();
-            }
-            else
-            {
-                float s = UiTheme.DpiScaleOf(this);
-                int padY = UiTheme.S(2, s);
-                int trackH = Math.Max(1, Height - padY * 2);
-                int travel = Math.Max(1, trackH - thumb.Height);
-                double frac = Math.Max(0.0, Math.Min(1.0, (double)(e.Y - padY - thumb.Height / 2) / travel));
-                if (Scrolled != null) Scrolled((int)Math.Round(frac * maxScroll));
-            }
+            if (e.Button != MouseButtons.Left) return;
+            BeginDragAt(e.Y, true);
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            if (!dragging || maxScroll <= 0) return;
-            float s = UiTheme.DpiScaleOf(this);
-            int padY = UiTheme.S(2, s);
-            int trackH = Math.Max(1, Height - padY * 2);
-            int thumbH = ThumbBounds().Height;
-            int travel = Math.Max(1, trackH - thumbH);
-            double frac = Math.Max(0.0, Math.Min(1.0, (double)(e.Y - padY - dragOffset) / travel));
-            if (Scrolled != null) Scrolled((int)Math.Round(frac * maxScroll));
+            MoveDragTo(e.Y);
         }
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (dragging)
-            {
-                dragging = false;
-                Capture = false;
-                Invalidate();
-            }
+            EndDrag(true);
+        }
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture && dragging) EndDrag(false);
         }
         protected override void OnMouseWheel(MouseEventArgs e)
         {
@@ -2919,11 +3155,21 @@ namespace QuotaTrayApp
     internal sealed class QuotaMeter : Control
     {
         private WindowInfo quota;
-        private string title, reset;
+        private string title, reset, resetClock;
         private bool superseded;
         private Font largeFont;
         private FontFamily largeFontFamily;
         internal static bool Valid(WindowInfo w) { return w!=null && !Double.IsNaN(w.used) && !Double.IsInfinity(w.used) && w.used>=0 && w.used<=100 && w.windowMins>0; }
+        // 设置页空间够用，倒计时后面补一条具体日期时间，免得机主要自己算到哪天几点。
+        internal static string ResetClock(double unixSec)
+        {
+            if (Double.IsNaN(unixSec) || Double.IsInfinity(unixSec) || unixSec <= 0 || unixSec > 253402300799) return "";
+            DateTime at = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixSec).ToLocalTime();
+            string clock = at.ToString("HH:mm");
+            if (at.Year != DateTime.Now.Year) return L.F("（{0}年{1}月{2}日 {3}）", at.Year, at.Month, at.Day, clock);
+            return L.F("（{0}月{1}日 {2}）", at.Month, at.Day, clock);
+        }
+        internal string ResetClockForTest { get { return resetClock; } }
         internal QuotaMeter(WindowInfo quota, string title, bool superseded = false)
         {
             float s=UiTheme.SystemDpiScale();
@@ -2938,11 +3184,12 @@ namespace QuotaTrayApp
             if (!Valid(window)) window = null;
             bool nextSuperseded = window != null && superseded;
             string nextReset = window == null ? L.T("暂无") : TrayContext.MultiTooltipCountdown(window.resetsAt);
-            if (title == label && reset == nextReset && this.superseded == nextSuperseded &&
+            string nextClock = window == null ? "" : ResetClock(window.resetsAt);
+            if (title == label && reset == nextReset && resetClock == nextClock && this.superseded == nextSuperseded &&
                 (quota == null ? window == null : window != null && quota.used == window.used)) return;
-            quota = window; title = label; reset = nextReset; this.superseded = nextSuperseded;
+            quota = window; title = label; reset = nextReset; resetClock = nextClock; this.superseded = nextSuperseded;
             Text = title + " · " + (quota == null ? L.T("暂无") : L.F("剩余 {0}%", QuotaWindow.Remaining(quota.used)));
-            AccessibleName = Text;
+            AccessibleName = String.IsNullOrEmpty(resetClock) ? Text : Text + " · " + reset + " · " + resetClock;
             Invalidate();
         }
         protected override void OnPaint(PaintEventArgs e)
@@ -2979,7 +3226,18 @@ namespace QuotaTrayApp
             }
             Rectangle track=new Rectangle(0,UiTheme.S(61,s),Width,Math.Max(4,UiTheme.S(5,s))); UiTheme.QuotaGradient(e.Graphics,track,UiTheme.Input);
             if(quota!=null) { int filled=(int)Math.Round(track.Width*remaining/100.0); if(filled>1) UiTheme.QuotaGradient(e.Graphics,new Rectangle(track.X,track.Y,filled,track.Height),color); }
-            UiTheme.DrawText(this,e.Graphics,reset,Font,new Rectangle(0,UiTheme.S(69,s),Width,UiTheme.S(22,s)),mutedInk,TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            Rectangle resetRow = new Rectangle(0, UiTheme.S(69, s), Width, UiTheme.S(22, s));
+            int clockWidth = 0;
+            if (!String.IsNullOrEmpty(resetClock))
+                clockWidth = TextRenderer.MeasureText(e.Graphics, resetClock, Font, new Size(Width, resetRow.Height),
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            int clockLeft = Math.Max(0, resetRow.Width - clockWidth);
+            int countWidth = clockWidth > 0 ? Math.Max(1, clockLeft - UiTheme.S(8, s)) : resetRow.Width;
+            UiTheme.DrawText(this, e.Graphics, reset, Font, new Rectangle(resetRow.Left, resetRow.Top, countWidth, resetRow.Height), mutedInk,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            if (clockWidth > 0)
+                UiTheme.DrawText(this, e.Graphics, resetClock, Font, new Rectangle(clockLeft, resetRow.Top, clockWidth, resetRow.Height), mutedInk,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
         }
         protected override void Dispose(bool disposing)
         {
@@ -4033,6 +4291,14 @@ namespace QuotaTrayApp
         }
         protected override void OnKeyDown(KeyEventArgs e) { HandleNavigation(e.KeyCode); e.Handled = true; }
         protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); if (menu && ready) Close(); }
+        // 设置下拉必须保持所属窗口的激活状态。点它时 Windows 会先发 WM_MOUSEACTIVATE；
+        // 若按默认值激活自己，所属窗口立刻 Deactivate，弹层就在鼠标抬起前被关掉，选项永远选不中。
+        // MA_NOACTIVATE(3) 既不让弹层抢激活，也保留这次点击，抬起时照常 Commit。
+        protected override void WndProc(ref Message m)
+        {
+            if (!menu && m.Msg == 0x0021) { m.Result = (IntPtr)3; return; }
+            base.WndProc(ref m);
+        }
         private void OnOwnerDeactivate(object sender, EventArgs e) { Close(); }
         bool IMessageFilter.PreFilterMessage(ref Message message)
         {
