@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.61.0")]
+[assembly: AssemblyVersion("1.9.62.0")]
 
 namespace QuotaTrayApp
 {
@@ -2855,6 +2855,7 @@ namespace QuotaTrayApp
                 identity = reply == null ? null : reply.identity,
                 at = reply == null ? 0 : reply.at,
                 primary = shortWindow, secondary = longWindow,
+                resetCredits = reply == null ? null : reply.resetCredits,
                 code = shortWindow == null && longWindow == null ? "no_quota_data" : null
             };
         }

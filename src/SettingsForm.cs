@@ -814,8 +814,9 @@ namespace QuotaTrayApp
                     creditLine.Margin = showCredit ? new Padding(0, S(8), 0, 0) : Padding.Empty;
                     changed = true;
                 }
+                creditLine.Tag = creditWarning;
                 creditLine.ForeColor = creditWarning
-                    ? (UiTheme.Dark ? Color.FromArgb(228, 86, 86) : Color.FromArgb(196, 46, 46))
+                    ? UiTheme.WarningText
                     : UiTheme.Accent;
             }
 
@@ -2051,6 +2052,8 @@ namespace QuotaTrayApp
             if (IsVersionText(root)) root.ForeColor = Dark ? Color.FromArgb(142, 146, 149) : Color.FromArgb(92, 102, 108);
             if (root.Name == "update-status")
                 root.ForeColor = root.Tag is bool && (bool)root.Tag ? UpdateBlue : (glass ? GlassMuted : Muted);
+            if (root.Name == "reset-credits-line")
+                root.ForeColor = root.Tag is bool && (bool)root.Tag ? WarningText : Accent;
             foreach (Control child in root.Controls) Apply(child);
             if (root.IsHandleCreated && (root is ScrollableControl))
             {

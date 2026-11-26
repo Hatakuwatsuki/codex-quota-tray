@@ -395,9 +395,12 @@ namespace QuotaTrayApp
             if (r.resetCredits.hasDetails)
             {
                 s.cachedResetCredits = r.resetCredits;
-                s.lastCreditDetailUtc = DateTime.UtcNow;
+                lock (gate)
+                {
+                    s.lastCreditDetailUtc = DateTime.UtcNow;
+                    s.forceCreditDetail = false;
+                }
                 s.lastCreditCount = r.resetCredits.availableCount;
-                s.forceCreditDetail = false;
                 return;
             }
             bool countChanged = s.lastCreditCount != r.resetCredits.availableCount;
@@ -405,14 +408,20 @@ namespace QuotaTrayApp
             if (r.resetCredits.availableCount == 0)
             {
                 s.cachedResetCredits = r.resetCredits;
-                s.forceCreditDetail = false;
-                if (creditDetailsRequested) s.lastCreditDetailUtc = DateTime.UtcNow;
+                lock (gate)
+                {
+                    s.forceCreditDetail = false;
+                    if (creditDetailsRequested) s.lastCreditDetailUtc = DateTime.UtcNow;
+                }
                 return;
             }
             if (countChanged && !creditDetailsRequested)
             {
-                s.forceCreditDetail = true;
-                lock (gate) if (refreshSlot == null) refreshSlot = s.account.slot;
+                lock (gate)
+                {
+                    s.forceCreditDetail = true;
+                    if (refreshSlot == null) refreshSlot = s.account.slot;
+                }
                 wake.Set();
             }
             else if (s.cachedResetCredits != null && s.cachedResetCredits.availableCount == r.resetCredits.availableCount)
@@ -421,8 +430,11 @@ namespace QuotaTrayApp
             }
             if (creditDetailsRequested)
             {
-                s.lastCreditDetailUtc = DateTime.UtcNow;
-                s.forceCreditDetail = false;
+                lock (gate)
+                {
+                    s.lastCreditDetailUtc = DateTime.UtcNow;
+                    s.forceCreditDetail = false;
+                }
             }
         }
         private void SyncDesktop()
