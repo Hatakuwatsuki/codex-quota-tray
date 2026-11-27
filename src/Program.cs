@@ -26,7 +26,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex Quota Tray")]
 [assembly: AssemblyProduct("Codex Quota Tray")]
 [assembly: AssemblyDescription("Shows ChatGPT / Codex 5-hour and 7-day quota in the notification area")]
-[assembly: AssemblyVersion("1.9.62.0")]
+[assembly: AssemblyVersion("1.9.65.0")]
 
 namespace QuotaTrayApp
 {
@@ -754,8 +754,8 @@ namespace QuotaTrayApp
             En["{0}年{1}月{2}日 {3}"] = "{0}/{1}/{2} {3}";
             En["重置券提醒"] = "Reset pass alerts";
             En["官方发放新重置券或临近过期时提醒，也可在下方按账号单独调整。"] = "Alerts when a new reset pass arrives or nears expiry; you can still toggle each account below.";
-            En["收到新重置券（共 {0} 张）"] = "New reset pass ({0} available)";
-            En["重置券即将过期（共 {0} 张）"] = "Reset pass expiring soon ({0} left)";
+            En["收到新重置券"] = "New reset pass";
+            En["重置券即将过期"] = "Reset pass expiring soon";
             En["{0} 过期"] = "Expires {0}";
             En["{0}后过期"] = "Expires in {0}";
             En["可在 Codex 中手动使用"] = "Redeem manually in Codex";
@@ -788,8 +788,8 @@ namespace QuotaTrayApp
             Ja["{0}年{1}月{2}日 {3}"] = "{0}年{1}月{2}日 {3}";
             Ja["重置券提醒"] = "リセット券アラート";
             Ja["官方发放新重置券或临近过期时提醒，也可在下方按账号单独调整。"] = "新しいリセット券の付与や期限間近を通知します。下のアカウント別に個別の変更もできます。";
-            Ja["收到新重置券（共 {0} 张）"] = "新しいリセット券（計{0}枚）";
-            Ja["重置券即将过期（共 {0} 张）"] = "リセット券の期限間近（残り{0}枚）";
+            Ja["收到新重置券"] = "新しいリセット券";
+            Ja["重置券即将过期"] = "リセット券の期限間近";
             Ja["{0} 过期"] = "{0} まで";
             Ja["{0}后过期"] = "あと{0}で失効";
             Ja["可在 Codex 中手动使用"] = "Codex から手動で使用できます";
@@ -985,7 +985,7 @@ namespace QuotaTrayApp
     {
         public int notifyLevel = 0;
         public bool notifySound = true;
-        internal const int DefaultNotifyVolume = 100;
+        internal const int DefaultNotifyVolume = 50;
         public int notifyVolume = DefaultNotifyVolume;
         public bool dailyPaceDefault = true;
         public bool resetCreditDefault = true;
@@ -1293,7 +1293,7 @@ namespace QuotaTrayApp
 
         internal static string ResetCreditNewBody(int count, double soonestExpiresAt)
         {
-            string line1 = L.F("收到新重置券（共 {0} 张）", Math.Max(1, count));
+            string line1 = L.T("收到新重置券");
             string clock = ResetCreditExpiryClock(soonestExpiresAt);
             string line2 = String.IsNullOrEmpty(clock) ? L.T("可在 Codex 中手动使用") : L.F("{0} 过期", clock);
             return line1 + "\n" + line2;
@@ -1301,7 +1301,7 @@ namespace QuotaTrayApp
 
         internal static string ResetCreditExpiringBody(int count, double soonestExpiresAt)
         {
-            string line1 = L.F("重置券即将过期（共 {0} 张）", Math.Max(1, count));
+            string line1 = L.T("重置券即将过期");
             string left = ResetCreditCountdown(soonestExpiresAt);
             string line2 = String.IsNullOrEmpty(left) ? L.T("可在 Codex 中手动使用") : L.F("{0}后过期", left);
             return line1 + "\n" + line2;
@@ -1642,7 +1642,7 @@ namespace QuotaTrayApp
             DrawToastText(g, bodyText, bodyFont, bodyBounds, textColor, compact);
             if (!String.IsNullOrEmpty(resetText))
                 DrawToastText(g, resetText, smallFont, new Rectangle(textLeft, UiTheme.S(65, dpiScale), ClientSize.Width - textLeft - tailPad, UiTheme.S(18, dpiScale)),
-                    detailColor);
+                    detailColor, compact);
 
             int cx = ClientSize.Width - UiTheme.S(17, dpiScale), cy = UiTheme.S(19, dpiScale), arm = UiTheme.S(4, dpiScale);
             using (Pen pen = new Pen(detailColor, Math.Max(1.1f, 1.2f * dpiScale)))
@@ -2962,7 +2962,7 @@ namespace QuotaTrayApp
                     Detail = L.T("最后成功") + " " + (lastSuccess == DateTime.MinValue ? L.T("暂无") : lastSuccess.ToString("MM-dd HH:mm")) });
             return rows.ToArray();
         }
-        internal bool ShowQuotaTip(NotifyIcon icon, string header, ConnectionReply reply, string error, DateTime lastSuccess)
+        internal bool ShowQuotaTip(NativeTrayIcon icon, string header, ConnectionReply reply, string error, DateTime lastSuccess)
         {
             if (QuotaTipBlockedByMenu()) return true;
             try
@@ -2981,7 +2981,7 @@ namespace QuotaTrayApp
             }
         }
         internal void HideQuotaTip() { if (quotaTip != null && !quotaTip.IsDisposed) quotaTip.Dismiss(); }
-        internal bool RefreshQuotaTip(NotifyIcon icon, string header, ConnectionReply reply, string error, DateTime lastSuccess)
+        internal bool RefreshQuotaTip(NativeTrayIcon icon, string header, ConnectionReply reply, string error, DateTime lastSuccess)
         {
             if (quotaTip == null || quotaTip.IsDisposed || !quotaTip.PrepareRefresh(icon)) return true;
             return ShowQuotaTip(icon, header, reply, error, lastSuccess);
@@ -3135,7 +3135,7 @@ namespace QuotaTrayApp
                 DailyPaceDecision pace = dailyPace.Evaluate(null, settings.dailyPaceDefault,
                     secondaryUsed, secondaryReset, DateTimeOffset.UtcNow);
                 if (pace.Triggered)
-                    accountToasts.Enqueue(null, L.T("额度显示器"), NotifyRules.DailyPaceBody(), NoSound, null, true);
+                    accountToasts.Enqueue(null, L.T("额度显示器"), NotifyRules.DailyPaceBody(), DailyPaceSound, null, true);
             }
             if (settings.notifyLevel < 0) return;
             bool singleWindow = primaryUsed < 0;
@@ -3284,7 +3284,9 @@ namespace QuotaTrayApp
         }
 
         internal const string RecoverySound = "notify-restored.wav";
-        internal static readonly string[] NotifySoundFiles = new string[] { "notify.wav", "notify-5h-empty.wav", "notify-7d-empty.wav", RecoverySound };
+        internal const string DailyPaceSound = "credit-recommendation.wav";
+        internal const string ResetVoucherSound = "reset-voucher.wav";
+        internal static readonly string[] NotifySoundFiles = new string[] { "notify.wav", "notify-5h-empty.wav", "notify-7d-empty.wav", RecoverySound, DailyPaceSound, ResetVoucherSound };
         internal static System.Media.SoundPlayer LoadNotifySound(string dir,string soundFile,bool embeddedOnly=false)
         {
             string requested=String.IsNullOrEmpty(soundFile)?"notify.wav":soundFile;
@@ -4140,24 +4142,24 @@ namespace QuotaTrayApp
             bool resetCreditNew = kind == "reset-credit-new";
             bool resetCreditExpiring = kind == "reset-credit-expiring";
             bool restored = kind == "5h-restored" || kind == "7d-restored";
-            bool compactToast = restored || dailyPaceDemo;
+            bool compactToast = restored || dailyPaceDemo || resetCreditNew || resetCreditExpiring;
             bool exhausted = kind == "5h-empty" || kind == "7d-empty";
             bool weekly = kind == "7d-empty" || kind == "7d-25" || kind == "7d-restored";
             string window = weekly ? L.F("{0} 天", 7) : L.T("5 小时");
             if (resetCreditNew)
             {
                 body = NotifyRules.ResetCreditNewBody(2, DateTimeOffset.UtcNow.AddDays(18).ToUnixTimeSeconds());
-                sound = RecoverySound;
+                sound = ResetVoucherSound;
             }
             else if (resetCreditExpiring)
             {
                 body = NotifyRules.ResetCreditExpiringBody(1, DateTimeOffset.UtcNow.AddHours(12).ToUnixTimeSeconds());
-                sound = "notify.wav";
+                sound = NoSound;
             }
             else if (dailyPaceDemo)
             {
                 body = NotifyRules.DailyPaceBody();
-                sound = NoSound;
+                sound = DailyPaceSound;
             }
             else if (restored)
             {

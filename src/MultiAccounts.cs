@@ -86,8 +86,7 @@ namespace QuotaTrayApp
             internal ConnectionReply reply;
             internal DateTime lastSuccess;
             internal string error = "not_checked";
-            internal NotifyIcon icon;
-            internal TrayIconHover hover;
+            internal NativeTrayIcon icon;
             internal string iconKey;
             internal NotifyWindow tier, fixedWindow;
             internal int level = int.MinValue;
@@ -323,7 +322,7 @@ namespace QuotaTrayApp
                 var remove = new List<string>();
                 foreach (KeyValuePair<string, State> pair in states)
                     if (!incoming.ContainsKey(pair.Key) || !incoming[pair.Key].connected || !SameIdentity(pair.Value.account.identity, incoming[pair.Key].identity)) remove.Add(pair.Key);
-                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.Visible = false; states[key].icon.Dispose(); } states.Remove(key); dailyPace.ResetSlot(key); resetCreditsTracker.ResetSlot(key); }
+                foreach (string key in remove) { if (states[key].icon != null) { states[key].icon.SetVisible(false); states[key].icon.Dispose(); } states.Remove(key); dailyPace.ResetSlot(key); resetCreditsTracker.ResetSlot(key); }
                 foreach (ConnectedSlot a in incoming.Values)
                 {
                     if (!a.connected || a.identity == null || string.IsNullOrEmpty(a.identity.userId) || string.IsNullOrEmpty(a.identity.accountId)) continue;
@@ -462,14 +461,14 @@ namespace QuotaTrayApp
                 DailyPaceDecision pace = dailyPace.Evaluate(s.account.slot, settings.DailyPaceFor(s.account.slot),
                     longWin.used, longWin.resetsAt, DateTimeOffset.UtcNow);
                 if (pace.Triggered)
-                    host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.DailyPaceBody(), TrayContext.NoSound, AccountMask(s), true);
+                    host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.DailyPaceBody(), TrayContext.DailyPaceSound, AccountMask(s), true);
             }
             ResetCreditDecision rc = resetCreditsTracker.Evaluate(s.account.slot, settings.ResetCreditFor(s.account.slot),
                 s.reply.resetCredits, DateTimeOffset.UtcNow, creditDetailsRequested);
             if (rc.NewCreditTriggered)
-                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditNewBody(rc.AvailableCount, rc.SoonestExpiresAt), TrayContext.RecoverySound, AccountMask(s), false);
+                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditNewBody(rc.AvailableCount, rc.SoonestExpiresAt), TrayContext.ResetVoucherSound, AccountMask(s), true);
             else if (rc.ExpiringTriggered)
-                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditExpiringBody(rc.AvailableCount, rc.ExpiringSoonestAt), "notify.wav", AccountMask(s), false);
+                host.ShowMultiToast(s.account.slot, LabelFor(s), NotifyRules.ResetCreditExpiringBody(rc.AvailableCount, rc.ExpiringSoonestAt), TrayContext.NoSound, AccountMask(s), true);
             int level = settings.LevelFor(s.account.slot);
             if (level < 0) { s.tier = null; s.fixedWindow = null; s.level = level; return; }
             bool single = s.reply.primary == null || QuotaWindow.IsLong(s.reply.primary.windowMins);
@@ -502,26 +501,24 @@ namespace QuotaTrayApp
                 if (s.icon == null)
                 {
                     State captured = s;
-                    var icon = new NotifyIcon(); icon.ContextMenuStrip = menu;
+                    var icon = new NativeTrayIcon((UiTrayMenu)menu);
                     ((UiTrayMenu)menu).Track(icon);
-                    icon.Icon = TrayContext.MakeMultiIcon(s.reply);
-                    s.hover = new TrayIconHover(icon, (UiTrayMenu)menu);
-                    s.hover.SetFallbackTip(ShortText(LabelFor(s)));
+                    icon.SetIcon(TrayContext.MakeMultiIcon(s.reply));
+                    icon.SetFallbackTip(ShortText(LabelFor(s)));
                     icon.MouseDown += delegate { selected = captured.account.slot; host.HideQuotaTip(); host.PrepareMultiMenu(selected, LabelFor(captured)); };
                     icon.MouseMove += delegate
                     {
-                        captured.hover.Reassert();
-                        if (captured.hover.Enabled && !host.ShowQuotaTip(icon, LabelFor(captured), captured.reply, captured.error, captured.lastSuccess))
-                            captured.hover.Disable();
+                        if (captured.icon.CustomHoverEnabled && !host.ShowQuotaTip(captured.icon, LabelFor(captured), captured.reply, captured.error, captured.lastSuccess))
+                            captured.icon.DisableCustomHover();
                     };
                     icon.DoubleClick += delegate { selected = captured.account.slot; RefreshSelected(); };
                     s.icon = icon;
                     s.iconKey = null;
                 }
             }
-            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) >= 0) s.hover.SetVisible(true);
+            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) >= 0) s.icon.SetVisible(true);
             if (!Managed) { host.SetMultiMode(true); Managed = true; }
-            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) < 0) s.hover.SetVisible(false);
+            foreach (State s in states.Values) if (Array.IndexOf(prefs.traySlots, s.account.slot) < 0) s.icon.SetVisible(false);
             if (selected == null || !states.ContainsKey(selected)) { var sorted = new List<string>(states.Keys); sorted.Sort(StringComparer.Ordinal); selected = sorted[0]; }
             foreach (State s in states.Values) UpdateIcon(s);
             SyncDesktop();
@@ -547,7 +544,7 @@ namespace QuotaTrayApp
                 if (key != s.iconKey)
                 {
                     Icon old = s.icon.Icon;
-                    s.hover.SetIcon(TrayContext.MakeMultiIcon(s.reply));
+                    s.icon.SetIcon(TrayContext.MakeMultiIcon(s.reply));
                     s.iconKey = key;
                     if (old != null && old != SystemIcons.Application) old.Dispose();
                 }
@@ -555,10 +552,9 @@ namespace QuotaTrayApp
             string tooltip = BuildNativeTooltip(s.account.slot, s.account.plan ?? (s.account.identity == null ? null : s.account.identity.plan),
                 s.account.emailMask ?? (s.account.identity == null ? null : s.account.identity.emailMask), s.reply, s.error, s.lastSuccess);
             // Keep NIF_TIP absent while custom hover owns the icon; store fallback text internally.
-            s.hover.SetFallbackTip(tooltip);
-            if (!s.hover.Enabled && tooltip != s.icon.Text) s.icon.Text = tooltip;
-            if (s.hover.Enabled && !host.RefreshQuotaTip(s.icon, LabelFor(s), s.reply, s.error, s.lastSuccess))
-                s.hover.Disable();
+            s.icon.SetFallbackTip(tooltip);
+            if (s.icon.CustomHoverEnabled && !host.RefreshQuotaTip(s.icon, LabelFor(s), s.reply, s.error, s.lastSuccess))
+                s.icon.DisableCustomHover();
         }
 
         private static string IconUsage(WindowInfo quota)
@@ -723,7 +719,7 @@ namespace QuotaTrayApp
             if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.Close();
             if (overviewForm != null && !overviewForm.IsDisposed) overviewForm.Close();
             StopGroup();
-            foreach (State s in states.Values) if (s.icon != null) { s.icon.Visible = false; s.icon.Dispose(); }
+            foreach (State s in states.Values) if (s.icon != null) { s.icon.SetVisible(false); s.icon.Dispose(); }
             if (!worker.IsAlive) wake.Close();
         }
     }

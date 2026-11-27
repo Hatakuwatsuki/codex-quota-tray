@@ -31,7 +31,7 @@ $quota = Join-Path $dir 'quota.js'
 $accounts = Join-Path $dir 'accounts.js'
 $soundDir = Join-Path $project '资源'
 if (-not (Test-Path -LiteralPath $soundDir -PathType Container)) { $soundDir = $project }
-$soundResources = foreach ($name in @('notify.wav','notify-5h-empty.wav','notify-7d-empty.wav','notify-restored.wav')) {
+$soundResources = foreach ($name in @('notify.wav','notify-5h-empty.wav','notify-7d-empty.wav','notify-restored.wav','credit-recommendation.wav','reset-voucher.wav')) {
     $wav = Join-Path $soundDir $name
     if (-not (Test-Path -LiteralPath $wav -PathType Leaf)) { throw "缺少提示音：$wav" }
     "/resource:$wav,$name"

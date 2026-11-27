@@ -511,6 +511,7 @@ namespace QuotaTrayApp
             }
             CaptureBasePositionsAndApplyScroll();
         }
+        private bool PageScrollable { get { return page != "general"; } }
         private void CaptureBasePositionsAndApplyScroll()
         {
             if (content == null || scrollBar == null || applyingScroll || resizingCards) return;
@@ -523,11 +524,23 @@ namespace QuotaTrayApp
                 if (child.Visible) bottom = Math.Max(bottom, child.Top + child.Height + child.Margin.Bottom);
             }
             int viewHeight = Math.Max(1, content.ClientSize.Height);
-            totalContentHeight = Math.Max(viewHeight, bottom + content.Padding.Bottom);
-            maxScroll = Math.Max(0, totalContentHeight - viewHeight);
-            scrollTarget = Math.Max(0, Math.Min(maxScroll, scrollTarget));
-            scrollCurrent = Math.Max(0, Math.Min(maxScroll, scrollCurrent));
-            if (maxScroll == 0) overscroll = Math.Max(-S(36), Math.Min(S(36), overscroll));
+            if (!PageScrollable)
+            {
+                totalContentHeight = viewHeight;
+                maxScroll = 0;
+                scrollTarget = 0;
+                scrollCurrent = 0;
+                overscroll = 0;
+                scrollTimer.Stop();
+            }
+            else
+            {
+                totalContentHeight = Math.Max(viewHeight, bottom + content.Padding.Bottom);
+                maxScroll = Math.Max(0, totalContentHeight - viewHeight);
+                scrollTarget = Math.Max(0, Math.Min(maxScroll, scrollTarget));
+                scrollCurrent = Math.Max(0, Math.Min(maxScroll, scrollCurrent));
+                if (maxScroll == 0) overscroll = Math.Max(-S(36), Math.Min(S(36), overscroll));
+            }
             int barWidth = S(12);
             scrollBar.SetBounds(Math.Max(0, ClientSize.Width - barWidth - S(4)),
                 ScaledCaptionHeight + S(4), barWidth, Math.Max(1, ClientSize.Height - ScaledCaptionHeight - S(8)));
@@ -572,7 +585,7 @@ namespace QuotaTrayApp
             bool moved = false;
             try
             {
-                int offset = (int)Math.Round(scrollCurrent + overscroll);
+                int offset = PageScrollable ? (int)Math.Round(scrollCurrent + overscroll) : 0;
                 content.SuppressLayout = true;
                 if (offset != lastAppliedOffset)
                 {
@@ -580,7 +593,7 @@ namespace QuotaTrayApp
                     lastAppliedOffset = offset;
                 }
                 int viewHeight = Math.Max(1, content.ClientSize.Height);
-                bool canScroll = totalContentHeight > viewHeight + 1;
+                bool canScroll = PageScrollable && totalContentHeight > viewHeight + 1;
                 if (scrollBar != null)
                 {
                     scrollBar.Visible = canScroll;
@@ -627,7 +640,7 @@ namespace QuotaTrayApp
         }
         internal void HandleWheelDelta(int delta)
         {
-            if (delta == 0) return;
+            if (delta == 0 || !PageScrollable) return;
             double step = -(delta / 120.0) * S(54);
             double desired = scrollTarget + step;
             double maxBounce = S(40);
@@ -669,7 +682,7 @@ namespace QuotaTrayApp
         }
         private bool CanHandleWheel()
         {
-            if (!Visible || !ContainsFocus && Form.ActiveForm != this) return false;
+            if (!Visible || !PageScrollable || (!ContainsFocus && Form.ActiveForm != this)) return false;
             return !HasOpenComboPopup(this);
         }
         private static bool HasOpenComboPopup(Control parent)
@@ -1244,9 +1257,13 @@ namespace QuotaTrayApp
             Label label = TextLine("提醒音量", false);
             label.Name = "notify-volume-label";
             label.AutoSize = false;
-            label.Size = new Size(TextRenderer.MeasureText(label.Text, Font).Width + S(2), ControlHeight);
+            int labelWidth;
+            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+            using (StringFormat fmt = new StringFormat(StringFormat.GenericTypographic))
+                labelWidth = (int)Math.Ceiling(g.MeasureString(label.Text, Font, int.MaxValue, fmt).Width);
+            label.Size = new Size(labelWidth + S(3), ControlHeight);
             label.TextAlign = ContentAlignment.MiddleLeft;
-            label.Margin = new Padding(0, 0, S(6), 0);
+            label.Margin = new Padding(0, 0, S(1), 0);
             var volume = new UiPillSlider(new[] { 0, 25, 50, 75, 100 },
                 new[] { T("静音"), T("轻声"), T("适中"), T("响亮"), T("最大") })
             {
@@ -1260,9 +1277,11 @@ namespace QuotaTrayApp
             Label percent = TextLine("", false);
             percent.AutoSize = false;
             percent.Name = "notify-volume-value";
-            percent.Size = new Size(S(44), ControlHeight);
-            percent.TextAlign = ContentAlignment.MiddleRight;
-            percent.Margin = new Padding(0, 0, S(8), 0);
+            percent.Size = new Size(S(52), ControlHeight);
+            percent.TextAlign = ContentAlignment.MiddleCenter;
+            // 轨道右端有 11 DIP 内缩，右侧留出等宽内边距后文字紧致且正好落在「轨道末端—试听」正中，41 DIP 够放 100%。
+            percent.Padding = new Padding(0, 0, S(11), 0);
+            percent.Margin = Padding.Empty;
             percent.Text = volume.Value + "%";
             var test = new UiButton
             {
@@ -1333,15 +1352,19 @@ namespace QuotaTrayApp
                 card = Card();
                 inner = Inner(card);
                 Label heading = TextLine("软件更新", true);
-                heading.Margin = new Padding(0, 0, 0, S(8));
+                heading.Margin = new Padding(0, 0, 0, LayoutGap);
                 inner.Controls.Add(heading);
-                FlowLayoutPanel autoRow = Row();
-                autoRow.Margin = new Padding(0, 0, 0, LayoutGap);
+                FlowLayoutPanel updateRow = ActionRow();
+                updateRow.Name = "update-actions";
+                checkUpdateButton = Button("检查更新", false, delegate { Call(actions.CheckUpdate); RefreshReleaseStatus(); });
+                checkUpdateButton.Name = "check-update";
+                checkUpdateButton.Margin = new Padding(0, 0, S(16), 0);
                 var autoUpdate = new UiCheckBox
                 {
                     Name = "auto-update",
                     Text = T("有更新时自动更新"),
                     AutoSize = true,
+                    MinimumSize = new Size(0, ControlHeight),
                     Checked = snapshot.AutoUpdate,
                     Enabled = actions.SetAutoUpdate != null,
                     Margin = new Padding(0)
@@ -1360,11 +1383,9 @@ namespace QuotaTrayApp
                         changingAutoUpdate = false;
                     }
                 };
-                autoRow.Controls.Add(autoUpdate);
-                inner.Controls.Add(autoRow);
-                checkUpdateButton = Button("检查更新", false, delegate { Call(actions.CheckUpdate); RefreshReleaseStatus(); });
-                checkUpdateButton.Name = "check-update";
-                inner.Controls.Add(checkUpdateButton);
+                updateRow.Controls.Add(checkUpdateButton);
+                updateRow.Controls.Add(autoUpdate);
+                inner.Controls.Add(updateRow);
                 updateMessage = TextLine("", false);
                 updateMessage.Name = "update-status";
                 Font statusFont = new Font(Font.FontFamily, 9f);
@@ -2611,6 +2632,13 @@ namespace QuotaTrayApp
             if (UiTheme.IsGlass(this)) UiTheme.PaintUnderlay(this, e.Graphics, ClientRectangle);
             else base.OnPaintBackground(e);
         }
+        // 和标准 Label 一样把 Padding 算进文字区域，自绘时才不会忽略内边距。
+        private Rectangle TextBounds()
+        {
+            if (Padding == Padding.Empty) return ClientRectangle;
+            return new Rectangle(ClientRectangle.X + Padding.Left, ClientRectangle.Y + Padding.Top,
+                Math.Max(1, ClientRectangle.Width - Padding.Horizontal), Math.Max(1, ClientRectangle.Height - Padding.Vertical));
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             if (!UiTheme.IsGlass(this)) { base.OnPaint(e); return; }
@@ -2624,6 +2652,7 @@ namespace QuotaTrayApp
                 using (Brush brush = new SolidBrush(color))
                 {
                     fmt.HotkeyPrefix = UseMnemonic ? HotkeyPrefix.Show : HotkeyPrefix.None;
+                    if (!AutoSize && Text.IndexOf('\n') < 0) fmt.FormatFlags |= StringFormatFlags.NoWrap;
                     if (AutoEllipsis) fmt.Trimming = StringTrimming.EllipsisCharacter;
                     if (TextAlign == ContentAlignment.MiddleLeft || TextAlign == ContentAlignment.MiddleCenter || TextAlign == ContentAlignment.MiddleRight)
                         fmt.LineAlignment = StringAlignment.Center;
@@ -2633,7 +2662,7 @@ namespace QuotaTrayApp
                         fmt.Alignment = StringAlignment.Center;
                     else if (TextAlign == ContentAlignment.TopRight || TextAlign == ContentAlignment.MiddleRight || TextAlign == ContentAlignment.BottomRight)
                         fmt.Alignment = StringAlignment.Far;
-                    e.Graphics.DrawString(Text, Font, brush, ClientRectangle, fmt);
+                    e.Graphics.DrawString(Text, Font, brush, TextBounds(), fmt);
                 }
             }
             finally { e.Graphics.PixelOffsetMode = previousOffset; }
@@ -2940,7 +2969,7 @@ namespace QuotaTrayApp
                 Focus();
                 settle.Stop();
                 float distance = e.X - ValueX(position);
-                grabOffset = Math.Abs(distance) <= D(9) && Math.Abs(e.Y - D(16)) <= D(13) ? distance : 0;
+                grabOffset = Math.Abs(distance) <= D(9) && Math.Abs(e.Y - D(18)) <= D(13) ? distance : 0;
                 dragging = true;
                 Capture = true;
                 MoveThumb(e.X);
@@ -3056,8 +3085,9 @@ namespace QuotaTrayApp
 
         internal Rectangle ChannelBounds()
         {
-            int inset = D(16);
-            return new Rectangle(inset, D(13), Math.Max(1, Width - inset * 2), D(6));
+            int inset = D(11);
+            // 轨道和滑钮整体比控件顶边低 2 DIP，才和左侧「提醒音量」文字的中线对齐。
+            return new Rectangle(inset, D(15), Math.Max(1, Width - inset * 2), D(6));
         }
         internal float ValueX(double value)
         {
@@ -3071,7 +3101,7 @@ namespace QuotaTrayApp
             if (Width < 2 || Height < 2) return;
             float scale = UiTheme.DpiScaleOf(this);
             Rectangle rail = ChannelBounds();
-            int center = D(16);
+            int center = D(18);
             int thumbWidth = UiTheme.S(10, scale), thumbHeight = UiTheme.S(18, scale);
             float x = ValueX(position);
             RectangleF thumb = new RectangleF(x - thumbWidth / 2f, center - thumbHeight / 2f, thumbWidth, thumbHeight);
@@ -3131,7 +3161,10 @@ namespace QuotaTrayApp
         internal Rectangle ScaleCaptionBounds(int index)
         {
             int x = (int)Math.Round(ValueX(stops[index]));
-            int width = TextRenderer.MeasureText(labels[index], Font).Width;
+            int width;
+            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                width = TextRenderer.MeasureText(g, labels[index], Font, Size.Empty,
+                    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + 2;
             return new Rectangle(x - width / 2, D(34), width, Height - D(34));
         }
         private void PaintScale(Graphics graphics)
@@ -3150,7 +3183,7 @@ namespace QuotaTrayApp
                 using (var pen = new Pen(Color.FromArgb(selected ? 225 : 146, ink)))
                     graphics.DrawLine(pen, x, top, x, bottom);
                 UiTheme.DrawText(this, graphics, labels[i], Font, ScaleCaptionBounds(i), ink,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine);
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
             }
         }
     }
@@ -4370,30 +4403,42 @@ namespace QuotaTrayApp
 
     // WinForms registers legacy tray icons, which can display an empty native tooltip.
     // Version 4 suppresses it by default. Unpack its callbacks for the WinForms window.
-    internal sealed class TrayIconHover : NativeWindow
+    // Pure Win32 tray icon backed by our own hidden top-level message window.
+    // Unlike WinForms NotifyIcon, it never sends NIF_TIP or NIF_SHOWTIP in custom hover mode
+    // and self-heals cleanly on WM_TASKBARCREATED without reflection or hover-time IPC pokes.
+    internal sealed class NativeTrayIcon : NativeWindow, IDisposable
     {
-        private const int TrayCallback = 0x800, ContextMenu = 0x7b, MouseMove = 0x200;
-        private const int RightDown = 0x204, RightUp = 0x205, PopupOpen = 0x406;
+        private const int TrayCallback = 0x800, ContextMenuMsg = 0x7b, MouseMoveMsg = 0x200;
+        private const int LeftDown = 0x201, LeftDoubleClick = 0x203, RightDown = 0x204, RightUp = 0x205, PopupOpen = 0x406;
         private const uint AddIcon = 0, ModifyIcon = 1, DeleteIcon = 2, SetVersion = 4, CustomTooltipVersion = 4;
-        private const uint NifMessage = 0x01, NifIcon = 0x02;
+        private const uint NifMessage = 0x01, NifIcon = 0x02, NifTip = 0x04, NifInfo = 0x10;
         internal const uint CleanRegistrationFlags = NifMessage | NifIcon;
         internal const uint IconUpdateFlags = NifIcon;
         private static readonly int TaskbarCreated = RegisterWindowMessage("TaskbarCreated");
-        private static readonly System.Reflection.BindingFlags IconFields =
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-        private static readonly System.Reflection.FieldInfo IdField = typeof(NotifyIcon).GetField("id", IconFields);
-        private static readonly System.Reflection.FieldInfo WindowField = typeof(NotifyIcon).GetField("window", IconFields);
-        private static readonly System.Reflection.FieldInfo IconField = typeof(NotifyIcon).GetField("icon", IconFields);
-        private readonly NotifyIcon icon;
+        private static int nextIconId;
+
         private readonly UiTrayMenu menu;
-        private uint id;
+        private readonly uint id;
+        private Icon currentIcon;
+        private string fallbackTip = "";
+        private bool visible;
+        private bool added;
         private bool useCustom = true;
         private bool version4;
-        private bool blanked;
-        private string savedTip;
-        private DateTime lastAssert;
-        internal bool Enabled { get { return version4 && useCustom; } }
 
+        internal IntPtr WindowHandle { get { return Handle; } }
+        internal uint IconId { get { return id; } }
+        internal bool Visible { get { return visible; } }
+        internal bool CustomHoverEnabled { get { return version4 && useCustom; } }
+        internal Icon Icon { get { return currentIcon; } }
+        internal string Text { get { return fallbackTip ?? ""; } }
+
+        internal event MouseEventHandler MouseDown;
+        internal event EventHandler MouseMove;
+        internal event EventHandler DoubleClick;
+
+        [StructLayout(LayoutKind.Sequential)] private struct RectNative { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] private struct IconIdentifier { public int Size; public IntPtr Window; public uint Id; public Guid Guid; }
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct NotifyIconData
         {
@@ -4414,46 +4459,35 @@ namespace QuotaTrayApp
         [DllImport("shell32.dll", ExactSpelling = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool Shell_NotifyIconW(uint command, ref NotifyIconData data);
+        [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref IconIdentifier id, out RectNative rect);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int RegisterWindowMessage(string name);
 
-        internal TrayIconHover(NotifyIcon icon, UiTrayMenu menu)
+        internal NativeTrayIcon(UiTrayMenu menu)
         {
-            this.icon = icon;
             this.menu = menu;
+            id = (uint)System.Threading.Interlocked.Increment(ref nextIconId);
+            CreateHandle(new CreateParams { Caption = "QuotaTrayNativeIcon" });
         }
 
-        internal static bool TryGetIdentity(NotifyIcon icon, out IntPtr handle, out uint id)
+        private static string ClampTip(string text, int maxLen)
         {
-            handle = IntPtr.Zero;
-            id = 0;
-            if (icon == null || IdField == null || WindowField == null) return false;
-            var window = WindowField.GetValue(icon) as NativeWindow;
-            if (window == null || window.Handle == IntPtr.Zero) return false;
-            handle = window.Handle;
-            id = Convert.ToUInt32(IdField.GetValue(icon));
-            return true;
+            if (String.IsNullOrEmpty(text)) return "";
+            return text.Length <= maxLen ? text : text.Substring(0, maxLen);
         }
 
-        internal void SetFallbackTip(string tip)
+        internal void SetVisible(bool show)
         {
-            savedTip = tip ?? "";
-            if (!useCustom)
-            {
-                try { if (icon.Text != savedTip) icon.Text = savedTip; } catch { }
-            }
+            if (visible == show) return;
+            visible = show;
+            if (show) RegisterClean();
+            else RemoveFromShell();
         }
 
         internal void SetIcon(Icon nextIcon)
         {
             if (nextIcon == null) return;
-            if (!Enabled || Handle == IntPtr.Zero || IconField == null)
-            {
-                icon.Icon = nextIcon;
-                return;
-            }
-            // Update WinForms' cached icon reference without calling UpdateIcon(), which
-            // hardcodes NIF_TIP and recreates Windows 11 Explorer's empty 28x25 hover box.
-            IconField.SetValue(icon, nextIcon);
+            currentIcon = nextIcon;
+            if (!added || Handle == IntPtr.Zero) return;
             var modify = new NotifyIconData
             {
                 Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
@@ -4465,196 +4499,369 @@ namespace QuotaTrayApp
             Shell_NotifyIconW(ModifyIcon, ref modify);
         }
 
-        internal void SetVisible(bool visible)
+        internal void SetFallbackTip(string tip)
         {
-            if (icon.Visible == visible) return;
-            if (visible && useCustom)
+            fallbackTip = tip ?? "";
+            if (useCustom || !added || Handle == IntPtr.Zero) return;
+            var modify = new NotifyIconData
             {
-                if (!blanked && !String.IsNullOrEmpty(icon.Text)) savedTip = icon.Text;
-                try { icon.Text = ""; } catch { }
-                blanked = true;
-            }
-            icon.Visible = visible;
-            version4 = false;
-            if (!visible || !useCustom)
-            {
-                if (!visible && !useCustom) RestoreFallbackTip();
-                return;
-            }
-            IntPtr window;
-            if (!TryGetIdentity(icon, out window, out id)) return;
-            if (Handle != window) AssignHandle(window);
-            RegisterCleanVersion4();
+                Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
+                Window = Handle,
+                Id = id,
+                Flags = NifTip,
+                Tip = ClampTip(fallbackTip, 127)
+            };
+            Shell_NotifyIconW(ModifyIcon, ref modify);
         }
 
-        internal void Disable()
+        internal void DisableCustomHover()
         {
             useCustom = false;
             if (version4 && ApplyVersion(0)) version4 = false;
-            RestoreFallbackTip();
+            if (added && Handle != IntPtr.Zero) SetFallbackTip(fallbackTip);
         }
 
-        private void RestoreFallbackTip()
+        internal void ShowBalloonTip(int timeoutMs, string title, string text, ToolTipIcon tipIcon)
         {
-            if (!blanked && String.IsNullOrEmpty(savedTip)) return;
-            blanked = false;
-            try { icon.Text = savedTip ?? ""; } catch { }
-        }
-
-        // WinForms NotifyIcon always calls Shell_NotifyIcon with NIF_TIP (0x04) even when
-        // Text is "". Windows 11 Explorer builds an empty 28x25 XAML ToolTip host whenever
-        // NIF_TIP is supplied. Replace the icon entry with a clean NIF_MESSAGE | NIF_ICON
-        // registration (no NIF_TIP, no NIF_SHOWTIP) and set NOTIFYICON_VERSION_4.
-        private void RegisterCleanVersion4()
-        {
+            if (!added || Handle == IntPtr.Zero) return;
+            uint flags = tipIcon == ToolTipIcon.Error ? 3u : tipIcon == ToolTipIcon.Warning ? 2u : tipIcon == ToolTipIcon.Info ? 1u : 0u;
             var data = new NotifyIconData
             {
                 Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
                 Window = Handle,
-                Id = id
+                Id = id,
+                Flags = NifInfo,
+                InfoTitle = ClampTip(title, 63),
+                Info = ClampTip(text, 255),
+                InfoFlags = flags
             };
-            Shell_NotifyIconW(DeleteIcon, ref data);
-            Icon current = icon.Icon;
-            data.Flags = CleanRegistrationFlags;
-            data.Callback = TrayCallback;
-            data.Icon = current != null ? current.Handle : IntPtr.Zero;
-            Shell_NotifyIconW(AddIcon, ref data);
-            version4 = ApplyVersion(CustomTooltipVersion);
+            Shell_NotifyIconW(ModifyIcon, ref data);
         }
 
-        // Explorer can drop the version-4 registration when it rebuilds the notification area,
-        // and the window handle can change with it. Re-assert the registration right before a
-        // custom tip is shown so the native tooltip (and its empty host popup) stays hidden.
-        // Rate limited because MouseMove fires continuously while the pointer stays on the icon.
-        internal void Reassert()
+        internal Rectangle GetBounds()
         {
-            if (!useCustom || !icon.Visible) return;
-            DateTime now = DateTime.UtcNow;
-            if ((now - lastAssert).TotalMilliseconds < 1000) return;
-            Rebind(false);
+            try
+            {
+                if (Handle != IntPtr.Zero)
+                {
+                    IconIdentifier ident = new IconIdentifier { Size = Marshal.SizeOf(typeof(IconIdentifier)), Window = Handle, Id = id };
+                    RectNative rect;
+                    if (Shell_NotifyIconGetRect(ref ident, out rect) == 0)
+                    {
+                        Rectangle bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+                        if (!bounds.IsEmpty && Screen.FromRectangle(bounds).Bounds.Contains(bounds.Location)) return bounds;
+                    }
+                }
+            }
+            catch { }
+            Point cursor = Cursor.Position;
+            return new Rectangle(cursor.X - 16, cursor.Y - 16, 32, 32);
         }
 
-        // Identity is re-read every time: Explorer rebuilds the notification area on its own
-        // schedule and the window handle or icon id can change underneath us.
-        private void Rebind(bool forceCleanAdd)
+        private void RegisterClean()
         {
-            lastAssert = DateTime.UtcNow;
-            IntPtr window;
-            uint currentId;
-            if (!useCustom || !icon.Visible || !TryGetIdentity(icon, out window, out currentId))
+            if (Handle == IntPtr.Zero) return;
+            var del = new NotifyIconData { Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)), Window = Handle, Id = id };
+            Shell_NotifyIconW(DeleteIcon, ref del);
+            var data = new NotifyIconData
             {
-                version4 = false;
-                return;
-            }
-            bool identityChanged = Handle != window || id != currentId;
-            id = currentId;
-            if (Handle != window)
-            {
-                if (Handle != IntPtr.Zero) ReleaseHandle();
-                AssignHandle(window);
-            }
-            if (forceCleanAdd || identityChanged || !version4) RegisterCleanVersion4();
-            else version4 = ApplyVersion(CustomTooltipVersion);
+                Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)),
+                Window = Handle,
+                Id = id,
+                Flags = useCustom ? CleanRegistrationFlags : (CleanRegistrationFlags | NifTip),
+                Callback = TrayCallback,
+                Icon = currentIcon != null ? currentIcon.Handle : IntPtr.Zero,
+                Tip = useCustom ? null : ClampTip(fallbackTip, 127)
+            };
+            added = Shell_NotifyIconW(AddIcon, ref data);
+            version4 = added && useCustom && ApplyVersion(CustomTooltipVersion);
+        }
+
+        private void RemoveFromShell()
+        {
+            version4 = false;
+            if (!added || Handle == IntPtr.Zero) { added = false; return; }
+            var del = new NotifyIconData { Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)), Window = Handle, Id = id };
+            Shell_NotifyIconW(DeleteIcon, ref del);
+            added = false;
         }
 
         private bool ApplyVersion(uint version)
         {
+            if (Handle == IntPtr.Zero) return false;
             var data = new NotifyIconData { Size = (uint)Marshal.SizeOf(typeof(NotifyIconData)), Window = Handle, Id = id, Version = version };
             return Shell_NotifyIconW(SetVersion, ref data);
         }
 
-        protected override void WndProc(ref Message message)
+        protected override void WndProc(ref Message m)
         {
-            if (message.Msg == TaskbarCreated && useCustom && icon.Visible)
+            if (m.Msg == TaskbarCreated && visible)
             {
-                // Intercept TaskbarCreated before WinForms WmTaskbarCreated sends NIM_ADD with NIF_TIP.
-                Rebind(true);
+                RegisterClean();
                 return;
             }
-            if (message.Msg == TrayCallback && version4)
+            if (m.Msg == TrayCallback)
             {
-                int eventId = (int)(message.LParam.ToInt64() & 0xffff);
-                message.WParam = (IntPtr)id;
-                if (eventId == ContextMenu)
+                int eventId = (int)(m.LParam.ToInt64() & 0xffff);
+                if (eventId == MouseMoveMsg || eventId == PopupOpen)
                 {
-                    if (menu.PopupVisible) return;
-                    message.LParam = (IntPtr)RightDown;
-                    base.WndProc(ref message);
-                    eventId = RightUp;
+                    if (MouseMove != null) MouseMove(this, EventArgs.Empty);
                 }
-                if (eventId == RightUp && menu.PopupVisible) return;
-                if (eventId == PopupOpen) eventId = MouseMove;
-                message.LParam = (IntPtr)eventId;
+                else if (eventId == LeftDown)
+                {
+                    if (MouseDown != null) MouseDown(this, new MouseEventArgs(MouseButtons.Left, 1, 0, 0, 0));
+                }
+                else if (eventId == LeftDoubleClick)
+                {
+                    if (DoubleClick != null) DoubleClick(this, EventArgs.Empty);
+                }
+                else if (eventId == RightDown)
+                {
+                    if (MouseDown != null) MouseDown(this, new MouseEventArgs(MouseButtons.Right, 1, 0, 0, 0));
+                }
+                else if (eventId == RightUp)
+                {
+                    if (menu != null && !menu.PopupVisible) menu.ShowFor(this);
+                }
+                else if (eventId == ContextMenuMsg)
+                {
+                    if (menu != null && !menu.PopupVisible)
+                    {
+                        if (MouseDown != null) MouseDown(this, new MouseEventArgs(MouseButtons.Right, 1, 0, 0, 0));
+                        menu.ShowFor(this);
+                    }
+                }
+                return;
             }
-            base.WndProc(ref message);
+            base.WndProc(ref m);
+        }
+
+        public void Dispose()
+        {
+            SetVisible(false);
+            if (Handle != IntPtr.Zero) DestroyHandle();
         }
     }
 
     // Explorer draws its own translucent host popup while the pointer sits on a tray icon.
-    // With NOTIFYICON_VERSION_4 that popup stays hidden; if the registration was lost it can
-    // remain as a small dark square peeking out behind the quota tip. Hide only that empty
-    // shell: same window class, small, and overlapping the tip we just showed.
+    // On Win11 24H2 XAML taskbar, it can still spawn an empty Xaml_WindowedPopupClass box
+    // even under clean NOTIFYICON_VERSION_4. Intercept it via 4 out-of-context WinEvent hooks
+    // covering CREATE, SHOW, REORDER, and LOCATIONCHANGE across tip, anchor, taskbar strip,
+    // and overflow flyout regions before it can ever paint.
     internal static class TrayPopupSuppressor
     {
         private const string HoverShellClass = "Xaml_WindowedPopupClass";
-        private static DateTime lastSweep;
+        private const string OverflowFlyoutClass = "TopLevelWindowForOverflowXamlIsland";
+        private const uint EventObjectCreate = 0x8000;
+        private const uint EventObjectShow = 0x8002;
+        private const uint EventObjectReorder = 0x8004;
+        private const uint EventObjectLocationChange = 0x800B;
+        private const uint WinEventSkipOwnProcess = 0x0002;
+        private const uint SwpHidePark = 0x0001 | 0x0010 | 0x0080 | 0x0200; // NOSIZE | NOACTIVATE | HIDEWINDOW | NOOWNERZORDER
+        private static readonly IntPtr HwndBottom = new IntPtr(1);
 
         [StructLayout(LayoutKind.Sequential)] private struct RectNative { public int Left, Top, Right, Bottom; }
         private delegate bool EnumProc(IntPtr window, IntPtr parameter);
+        private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint idEventThread, uint dwmsEventTime);
+        private static readonly WinEventDelegate HookCallback = OnWinEvent;
+
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string windowName);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int length);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RectNative rect);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+        [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
+        [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+        private static IntPtr hookCreate, hookShow, hookReorder, hookMove;
+        private static uint watchedExplorerPid;
+        private static bool watching;
+        private static Rectangle activeTip, activeAnchor, activeOverflow;
+
+        internal static bool Enabled = true;
+        // Last protection pass and cumulative hook/sweep interceptions, surfaced by the tray hover sample.
+        internal static int LastFound, LastHidden, TotalSuppressed;
 
         internal static bool ShouldHide(string className, Rectangle shell, Rectangle tip)
         {
-            // The host popup can sit just outside the tip edge, so allow a margin.
-            Rectangle reach = tip;
-            reach.Inflate(48, 48);
-            return className == HoverShellClass && shell.Width > 0 && shell.Height > 0 &&
-                shell.Width <= 160 && shell.Height <= 120 && reach.IntersectsWith(shell);
+            return ShouldHide(className, shell, tip, Rectangle.Empty, Rectangle.Empty);
         }
 
-        internal static bool Enabled = true;
-        // Last protection pass, surfaced by the tray hover sample so the result is visible.
-        internal static int LastFound, LastHidden;
+        internal static bool ShouldHide(string className, Rectangle shell, Rectangle tip, Rectangle anchor)
+        {
+            return ShouldHide(className, shell, tip, anchor, Rectangle.Empty);
+        }
 
-        internal static int Hide(Rectangle tip)
+        internal static bool ShouldHide(string className, Rectangle shell, Rectangle tip, Rectangle anchor, Rectangle overflow)
+        {
+            if (className != HoverShellClass || shell.Width <= 0 || shell.Height <= 0) return false;
+            if (shell.Left <= -30000 || shell.Top <= -30000) return false;
+            if (shell.Width > 160 || shell.Height > 120) return false;
+            if (!tip.IsEmpty)
+            {
+                Rectangle reach = tip;
+                reach.Inflate(64, 64);
+                if (reach.IntersectsWith(shell)) return true;
+            }
+            if (!anchor.IsEmpty)
+            {
+                Rectangle iconReach = anchor;
+                iconReach.Inflate(96, 96);
+                if (iconReach.IntersectsWith(shell)) return true;
+            }
+            if (shell.Width <= 80 && shell.Height <= 60)
+            {
+                Rectangle reference = !anchor.IsEmpty ? anchor : tip;
+                if (!reference.IsEmpty)
+                {
+                    Screen screen = Screen.FromRectangle(reference);
+                    if (IsInTaskbarStrip(shell, screen.Bounds, screen.WorkingArea)) return true;
+                }
+                if (!overflow.IsEmpty)
+                {
+                    Rectangle flyoutReach = overflow;
+                    flyoutReach.Inflate(48, 48);
+                    if (flyoutReach.IntersectsWith(shell)) return true;
+                }
+            }
+            return false;
+        }
+
+        internal static bool IsInTaskbarStrip(Rectangle shell, Rectangle screenBounds, Rectangle workingArea)
+        {
+            Rectangle strip;
+            if (workingArea.Bottom < screenBounds.Bottom)
+                strip = Rectangle.FromLTRB(screenBounds.Left - 32, workingArea.Bottom - 96, screenBounds.Right + 32, screenBounds.Bottom + 32);
+            else if (workingArea.Top > screenBounds.Top)
+                strip = Rectangle.FromLTRB(screenBounds.Left - 32, screenBounds.Top - 32, screenBounds.Right + 32, workingArea.Top + 96);
+            else if (workingArea.Left > screenBounds.Left)
+                strip = Rectangle.FromLTRB(screenBounds.Left - 32, screenBounds.Top - 32, workingArea.Left + 96, screenBounds.Bottom + 32);
+            else if (workingArea.Right < screenBounds.Right)
+                strip = Rectangle.FromLTRB(workingArea.Right - 96, screenBounds.Top - 32, screenBounds.Right + 32, screenBounds.Bottom + 32);
+            else
+                strip = Rectangle.FromLTRB(screenBounds.Left - 32, screenBounds.Bottom - 120, screenBounds.Right + 32, screenBounds.Bottom + 32);
+            return strip.IntersectsWith(shell);
+        }
+
+        private static uint ResolveExplorerPid()
+        {
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) return 0;
+            uint pid;
+            GetWindowThreadProcessId(tray, out pid);
+            return pid;
+        }
+
+        private static Rectangle ResolveOverflowBounds()
+        {
+            IntPtr flyout = FindWindow(OverflowFlyoutClass, null);
+            if (flyout == IntPtr.Zero || !IsWindowVisible(flyout)) return Rectangle.Empty;
+            RectNative rect;
+            if (!GetWindowRect(flyout, out rect)) return Rectangle.Empty;
+            return Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+        }
+
+        private static void SuppressWindow(IntPtr window)
+        {
+            SetWindowPos(window, HwndBottom, -32000, -32000, 0, 0, SwpHidePark);
+            ShowWindow(window, 0);
+        }
+
+        private static void UnhookAll()
+        {
+            if (hookCreate != IntPtr.Zero) { UnhookWinEvent(hookCreate); hookCreate = IntPtr.Zero; }
+            if (hookShow != IntPtr.Zero) { UnhookWinEvent(hookShow); hookShow = IntPtr.Zero; }
+            if (hookReorder != IntPtr.Zero) { UnhookWinEvent(hookReorder); hookReorder = IntPtr.Zero; }
+            if (hookMove != IntPtr.Zero) { UnhookWinEvent(hookMove); hookMove = IntPtr.Zero; }
+            watchedExplorerPid = 0;
+        }
+
+        internal static void StartWatch(Rectangle tip, Rectangle anchor)
+        {
+            if (!Enabled) { StopWatch(); return; }
+            activeTip = tip;
+            activeAnchor = anchor;
+            activeOverflow = ResolveOverflowBounds();
+            watching = true;
+            uint pid = ResolveExplorerPid();
+            if (pid != 0 && (hookShow == IntPtr.Zero || watchedExplorerPid != pid))
+            {
+                UnhookAll();
+                watchedExplorerPid = pid;
+                hookCreate = SetWinEventHook(EventObjectCreate, EventObjectCreate, IntPtr.Zero, HookCallback, pid, 0, WinEventSkipOwnProcess);
+                hookShow = SetWinEventHook(EventObjectShow, EventObjectShow, IntPtr.Zero, HookCallback, pid, 0, WinEventSkipOwnProcess);
+                hookReorder = SetWinEventHook(EventObjectReorder, EventObjectReorder, IntPtr.Zero, HookCallback, pid, 0, WinEventSkipOwnProcess);
+                hookMove = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange, IntPtr.Zero, HookCallback, pid, 0, WinEventSkipOwnProcess);
+            }
+            Hide(tip, anchor);
+        }
+
+        internal static void StopWatch()
+        {
+            watching = false;
+            activeTip = Rectangle.Empty;
+            activeAnchor = Rectangle.Empty;
+            activeOverflow = Rectangle.Empty;
+            UnhookAll();
+        }
+
+        private static void OnWinEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint threadId, uint time)
+        {
+            if (!Enabled || !watching || hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return;
+            if (eventType != EventObjectCreate && !IsWindowVisible(hwnd)) return;
+            var name = new System.Text.StringBuilder(64);
+            if (GetClassName(hwnd, name, name.Capacity) == 0 || name.ToString() != HoverShellClass) return;
+            RectNative rect;
+            if (!GetWindowRect(hwnd, out rect)) return;
+            Rectangle shell = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+            if (!ShouldHide(HoverShellClass, shell, activeTip, activeAnchor, activeOverflow)) return;
+            SuppressWindow(hwnd);
+            LastFound++;
+            LastHidden++;
+            TotalSuppressed++;
+        }
+
+        internal static int Hide(Rectangle tip) { return Hide(tip, Rectangle.Empty); }
+
+        internal static int Hide(Rectangle tip, Rectangle anchor)
         {
             if (!Enabled) return 0;
-            DateTime now = DateTime.UtcNow;
-            if ((now - lastSweep).TotalMilliseconds < 400) return 0;
-            lastSweep = now;
-            int found = Sweep(tip, true);
+            Rectangle overflow = ResolveOverflowBounds();
+            int found = Sweep(tip, anchor, overflow, true);
             LastFound = found;
             LastHidden = found;
+            TotalSuppressed += found;
             return found;
         }
 
         // Read-only counterpart used by the tray hover sample so the result is checkable.
-        internal static int Count(Rectangle tip) { return Sweep(tip, false); }
+        internal static int Count(Rectangle tip) { return Sweep(tip, Rectangle.Empty, Rectangle.Empty, false); }
+        internal static int Count(Rectangle tip, Rectangle anchor) { return Sweep(tip, anchor, ResolveOverflowBounds(), false); }
 
-        private static int Sweep(Rectangle tip, bool hide)
+        private static int Sweep(Rectangle tip, Rectangle anchor, Rectangle overflow, bool hide)
         {
             int found = 0;
+            uint explorerPid = watchedExplorerPid != 0 ? watchedExplorerPid : ResolveExplorerPid();
             EnumWindows(delegate(IntPtr window, IntPtr parameter)
             {
                 if (!IsWindowVisible(window)) return true;
+                if (explorerPid != 0)
+                {
+                    uint pid;
+                    GetWindowThreadProcessId(window, out pid);
+                    if (pid != explorerPid) return true;
+                }
                 RectNative rect;
                 if (!GetWindowRect(window, out rect)) return true;
                 Rectangle shell = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
                 System.Text.StringBuilder name = new System.Text.StringBuilder(64);
                 GetClassName(window, name, name.Capacity);
-                if (!ShouldHide(name.ToString(), shell, tip)) return true;
+                if (!ShouldHide(name.ToString(), shell, tip, anchor, overflow)) return true;
                 found++;
-                if (hide)
-                {
-                    // Hiding alone can be undone by Explorer; park it off-screen as well.
-                    ShowWindow(window, 0);
-                    SetWindowPos(window, IntPtr.Zero, -32000, -32000, 0, 0, 0x15);
-                }
+                if (hide) SuppressWindow(window);
                 return true;
             }, IntPtr.Zero);
             return found;
@@ -4666,14 +4873,12 @@ namespace QuotaTrayApp
         private const int Shadow = 9, PadX = 14, PadY = 10, RowHeight = 22, HeaderHeight = 20;
         private readonly System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
         private readonly UiLiveBackdrop backdrop;
-        private NotifyIcon anchorIcon;
+        private NativeTrayIcon anchorIcon;
+        private Rectangle lastAnchor;
         private string header = "";
         private QuotaTipLine[] lines = new QuotaTipLine[0];
         private DateTime shownAt, lastRenderAt;
         private int dpi = 96;
-        [StructLayout(LayoutKind.Sequential)] private struct RectNative { public int Left, Top, Right, Bottom; }
-        [StructLayout(LayoutKind.Sequential)] private struct IconIdentifier { public int Size; public IntPtr Window; public uint Id; public Guid Guid; }
-        [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref IconIdentifier id, out RectNative rect);
         [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT point);
         [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
 
@@ -4686,7 +4891,7 @@ namespace QuotaTrayApp
             AutoScaleMode = AutoScaleMode.None;
             AccessibleRole = AccessibleRole.ToolTip;
             backdrop = new UiLiveBackdrop(BackdropBounds, delegate { if (!PresentSurface()) Dismiss(); });
-            life.Interval = 180;
+            life.Interval = 40;
             life.Tick += delegate { Tick(); };
         }
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -4699,34 +4904,19 @@ namespace QuotaTrayApp
                 return cp;
             }
         }
-        internal static Rectangle AnchorBounds(NotifyIcon icon)
+        internal static Rectangle AnchorBounds(NativeTrayIcon icon)
         {
-            try
-            {
-                IntPtr window;
-                uint iconId;
-                if (TrayIconHover.TryGetIdentity(icon, out window, out iconId))
-                {
-                    IconIdentifier id = new IconIdentifier { Size = Marshal.SizeOf(typeof(IconIdentifier)), Window = window, Id = iconId };
-                    RectNative rect;
-                    if (Shell_NotifyIconGetRect(ref id, out rect) == 0)
-                    {
-                        Rectangle bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
-                        if (!bounds.IsEmpty && Screen.FromRectangle(bounds).Bounds.Contains(bounds.Location)) return bounds;
-                    }
-                }
-            }
-            catch { }
+            if (icon != null) return icon.GetBounds();
             Point cursor = Cursor.Position;
             return new Rectangle(cursor.X - 16, cursor.Y - 16, 32, 32);
         }
-        internal bool PrepareRefresh(NotifyIcon icon)
+        internal bool PrepareRefresh(NativeTrayIcon icon)
         {
             if (!Visible || anchorIcon != icon) return false;
             lastRenderAt = DateTime.MinValue;
             return true;
         }
-        internal void Present(NotifyIcon icon, string title, QuotaTipLine[] rows, Rectangle? placementAnchor = null)
+        internal void Present(NativeTrayIcon icon, string title, QuotaTipLine[] rows, Rectangle? placementAnchor = null)
         {
             if (rows == null || rows.Length == 0) { Dismiss(); return; }
             DateTime now = DateTime.UtcNow;
@@ -4736,6 +4926,7 @@ namespace QuotaTrayApp
             header = title ?? "";
             lines = rows;
             Rectangle anchor = placementAnchor ?? AnchorBounds(icon);
+            lastAnchor = anchor;
             try { using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) dpi = (int)Math.Round(g.DpiX); } catch { }
             using (Font font = TipFont(9f))
             {
@@ -4754,12 +4945,11 @@ namespace QuotaTrayApp
                 Rectangle target = UiPopup.Placement(size, anchor, work, true, ScalePixel(Shadow), ScalePixel(6));
                 if (Visible && Bounds != target) Hide();
                 Bounds = target;
+                TrayPopupSuppressor.StartWatch(target, anchor);
                 if (!Visible) backdrop.CaptureInitial(BackdropBounds());
                 if (!PresentSurface()) throw new System.ComponentModel.Win32Exception();
                 if (!Visible) { Show(); backdrop.Start(this); }
-                // The native hover shell can survive a lost version-4 registration; it would
-                // otherwise peek out from under this window as a stray dark square.
-                TrayPopupSuppressor.Hide(Bounds);
+                TrayPopupSuppressor.Hide(Bounds, lastAnchor);
                 shownAt = DateTime.UtcNow;
                 lastRenderAt = shownAt;
                 life.Start();
@@ -4777,13 +4967,19 @@ namespace QuotaTrayApp
 
         protected override void OnVisibleChanged(EventArgs e)
         {
-            if (!Visible && backdrop != null) backdrop.Stop();
+            if (!Visible)
+            {
+                TrayPopupSuppressor.StopWatch();
+                if (backdrop != null) backdrop.Stop();
+            }
             base.OnVisibleChanged(e);
         }
         internal void Dismiss()
         {
             life.Stop();
             anchorIcon = null;
+            lastAnchor = Rectangle.Empty;
+            TrayPopupSuppressor.StopWatch();
             if (Visible) Hide();
         }
         // Debug preview used by --test-quota-tip; shows the real rendering without a tray icon.
@@ -4824,7 +5020,7 @@ namespace QuotaTrayApp
             if (!Visible) { life.Stop(); return; }
             // Keep guarding while the tip is up: Explorer may create its hover host a beat
             // after the tip appears, so one sweep at Present time is not enough.
-            TrayPopupSuppressor.Hide(Bounds);
+            TrayPopupSuppressor.Hide(Bounds, lastAnchor);
             if ((DateTime.UtcNow - shownAt).TotalSeconds > 8) { Dismiss(); return; }
             if (anchorIcon == null) return; // preview mode keeps the tip until its own timer closes it
             POINT cursor;
@@ -4906,27 +5102,32 @@ namespace QuotaTrayApp
         }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { life.Dispose(); backdrop.Dispose(); }
+            if (disposing) { TrayPopupSuppressor.StopWatch(); life.Dispose(); backdrop.Dispose(); }
             base.Dispose(disposing);
         }
     }
 
     internal sealed class UiTrayMenu : ContextMenuStrip
     {
-        private NotifyIcon target; private UiPopup popup;
+        private NotifyIcon target;
+        private NativeTrayIcon nativeTarget;
+        private UiPopup popup;
         private bool menuOpen;
         // 菜单开着的时候托盘悬停提示要让位，不然两个窗口会互相顶掉。
         internal bool PopupVisible { get { return menuOpen && popup != null && !popup.IsDisposed; } }
         internal string StatusText;
         internal Rectangle LastAnchor,LastPopupBounds;
         internal int AnimationFrames {get{return popup==null?0:popup.AnimationFrames;}}
-        internal void ShowFor(NotifyIcon icon){target=icon;Show(Cursor.Position);}
+        internal void ShowFor(NotifyIcon icon){target=icon;nativeTarget=null;Show(Cursor.Position);}
+        internal void ShowFor(NativeTrayIcon icon){nativeTarget=icon;target=null;Show(Cursor.Position);}
         [StructLayout(LayoutKind.Sequential)] private struct RectNative {public int Left,Top,Right,Bottom;}
         [StructLayout(LayoutKind.Sequential)] private struct IconIdentifier {public int Size;public IntPtr Window;public uint Id;public Guid Guid;}
         [DllImport("shell32.dll")]private static extern int Shell_NotifyIconGetRect(ref IconIdentifier id,out RectNative rect);
-        internal void Track(NotifyIcon icon) {icon.MouseDown+=delegate {target=icon;};}
+        internal void Track(NotifyIcon icon) {icon.MouseDown+=delegate {target=icon;nativeTarget=null;};}
+        internal void Track(NativeTrayIcon icon) {icon.MouseDown+=delegate {nativeTarget=icon;target=null;};}
         private Rectangle IconAnchor()
         {
+            if (nativeTarget != null) return nativeTarget.GetBounds();
             try
             {
                 var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
